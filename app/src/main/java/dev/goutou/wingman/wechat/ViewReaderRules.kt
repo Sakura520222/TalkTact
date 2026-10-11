@@ -50,7 +50,12 @@ fun chatTitleScore(
     val t = candidate.text
     if (t.isEmpty() || t.length > 32 || t in UI_WORDS || looksLikeViewDump(t)) return null
     if (t in avoidTexts || TITLE_NOISE.any { t.startsWith(it) }) return null
-    if (candidate.width < dp(24) || candidate.height < dp(14)) return null
+    // ⚠️ 宽度下限**不能太大**：备注是「单个字」的会话（张 / 王 / 李…）标题控件就只有一个字宽 ——
+    //    实测在常见密度下约 47px，而旧的 dp(24) 在 2.75 密度下要 66px，于是**单字备注的会话永远选不出标题**。
+    //    后果不是「读不到名字」这么简单：上层看到标题是空的，会沿用上一个会话的名字等下一轮 ——
+    //    一直等下去，就变成「换了窗口还在读上一个窗口的内容」（issue #6）。
+    //    dp(14) 仍然宽过一个图标，而且下面还有「居中 ±16%」和 UI 词表两道闸。
+    if (candidate.width < dp(14) || candidate.height < dp(14)) return null
     if (candidate.y < bandTop || candidate.y > bandBottom) return null
     val off = kotlin.math.abs((candidate.x + candidate.width / 2f) - screenWidth / 2f) / screenWidth.toFloat()
     if (off > 0.16f) return null

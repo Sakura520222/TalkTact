@@ -148,6 +148,16 @@ internal class Panel(private val a: Activity) {
     private var lastMsgs: List<ChatMsg> = emptyList()
     private var skipSensitiveFor = ""
     /**
+     * 用户点过「仍然分析这一条」的那一段原文（连同它属于哪个会话）。
+     *
+     * 为什么除了 [skipSensitiveFor] 还要存它：用户实测报过「点了继续分析、闪了一下又弹回风险卡」。
+     * [skipSensitiveFor] 挂的是 [screenKey]，而 screenKey 里含**消息列表指纹** ——
+     * 点击到下一轮 tick 之间只要屏幕抖一下（新消息、列表重排），键就不等了，刚放行的这一屏又命中。
+     * 同一段原文在同一个会话里，本该一直算「已放行」。
+     */
+    private var skipSensitiveSession = ""
+    private var skipSensitiveText = ""
+    /**
      * 「这一屏」的稳定身份：会话名 + 消息列表指纹 + 这几条消息的内容。
      *
      * **刻意不含角色档案 / 设置 / 说话风格** —— 那些东西每一轮都在长（[recordToRoles] 一直在往档案里补），
@@ -212,6 +222,8 @@ internal class Panel(private val a: Activity) {
     /** 「白名单开着但认不出这个会话的名字」只提示一次，免得每屏都弹。 */
     private var whitelistNameNotified = false
     private var chatName = ""
+    /** 连续多少轮读不到会话标题（见 [BLANK_TITLE_MAX_TICKS]）。 */
+    private var blankTitleTicks = 0
     private var lastScreenFingerprint = ""
     private var contextRevision = ""
     // （pendingRequestKey 现在是 job 的派生值，见下面的 Job）
@@ -559,10 +571,36 @@ internal class Panel(private val a: Activity) {
         val observedRawName = Roles.normalizeKey(reader.findChatTitle(decor, list).orEmpty())
         // 微信切换布局时标题控件可能短暂读空。已有会话遇到这个瞬态时，
         // 保留当前上下文并等待下一轮，不能把它当成新会话清掉展开结果。
+        //
+        // ⚠️ 但**不能无限等**：备注是单字、或者微信窗口被缩小时，标题会**一直**读不出来，
+        //    于是面板永远拿着上一个会话的名字，把上一个窗口的内容当成这一屏的 —— 这就是 issue #6
+        //    （用户原话「模块读取内容还为上一个窗口的内容」）。连续几轮都读不到就认输。
         if (observedRawName.isBlank() && chatName.isNotBlank()) {
-            Trace.note("标题", "会话标题暂时为空，保留「$chatName」并等待下一轮")
+            blankTitleTicks++
+            if (blankTitleTicks < BLANK_TITLE_MAX_TICKS) {
+                Trace.note(
+                    "标题",
+                    "会话标题暂时为空，保留「$chatName」并等待下一轮（$blankTitleTicks/$BLANK_TITLE_MAX_TICKS）",
+                )
+                return
+            }
+            Trace.note(
+                "标题",
+                "连续 $blankTitleTicks 轮读不到会话标题 → 不再沿用「$chatName」" +
+                    "（否则会把上一个窗口的内容当成这一屏的）",
+            )
+            blankTitleTicks = 0
+            dropConversation()
+            showStuck(
+                "军师 · 读不到会话名",
+                "这一屏读不出聊天对象的备注（微信可能改了标题控件，或者窗口太小）。\n" +
+                    "已经**不再沿用上一个会话的内容** —— 免得张冠李戴。\n" +
+                    "把微信窗口调大一点、或者退出这个聊天页再进来，通常就好了。\n" +
+                    "长按标题可以生成一份诊断发我。",
+            )
             return
         }
+        blankTitleTicks = 0
         // 标题抖动保护：微信的标题区会短暂显示「对方正在输入…」，会话被复用时也可能先读到上一个名字。
         // 只有同一个新名字**连着读到两轮**才算真换了人；否则这一轮仍按当前名字处理（不改上下文、不重置）。
         // 用户报的「折叠、展开、折叠、展开往复循环」最可能的一种来源就是这里：标题在「真名」和
@@ -620,6 +658,8 @@ internal class Panel(private val a: Activity) {
             if (anotherChat) {
                 lastCallAt = 0L
                 skipSensitiveFor = ""
+                skipSensitiveSession = ""
+                skipSensitiveText = ""
             }
             body = Body.None
             // 换了会话（或提示词 / 档案变了）：上一屏的内容已经不属于这里 ——
@@ -802,13 +842,21 @@ internal class Panel(private val a: Activity) {
         }
 
         val joined = msgs.joinToString("\n") { it.text }
-        // 用户点过「仍然分析这一条」→ 这一屏不再拦。
-        // ⚠️ 判定必须用 [screenKey]（屏稳定），**不能用 requestKey**：requestKey 里含角色档案，
-        // 而档案每轮都在变 → 上一轮记下的键永远对不上 → 每轮重新命中，点多少次都弹回风险卡。
-        val hits = if (cfg.allowSensitive || screenKey == skipSensitiveFor) emptyList() else Sensitive.hits(joined)
+        // 用户点过「仍然分析这一条」→ 这一屏不再拦。**两个键都认**：
+        //   ① [screenKey]（屏稳定键）—— 正常路径，换了屏自然失效；
+        //   ② 「同一个会话 + 同一段原文」—— 见 [skipSensitiveText]：screenKey 含消息列表指纹，
+        //      点击到下一轮之间抖一下就会让 ① 失配，于是刚放行的这一屏又弹回风险卡。
+        // ⚠️ 判定**不能用 requestKey**：它含角色档案，而档案每轮都在变 → 永远对不上，点多少次都弹回。
+        val approvedByText = skipSensitiveText.isNotBlank() &&
+            skipSensitiveSession == chatName && skipSensitiveText == joined
+        val hits = if (cfg.allowSensitive || screenKey == skipSensitiveFor || approvedByText) {
+            emptyList()
+        } else {
+            Sensitive.hits(joined)
+        }
         if (hits.isNotEmpty()) {
             Trace.note("敏感", "命中敏感词：${hits.joinToString("、")} → 只提示，不外发")
-            renderSensitive(hits)
+            renderSensitive(hits, joined)
             return
         }
 
@@ -1494,7 +1542,7 @@ internal class Panel(private val a: Activity) {
         setChip("军师 · 风险${s.risk} · ${s.replies.size}条", chipColor(s.risk))
     }
 
-    private fun renderSensitive(hits: List<String>) {
+    private fun renderSensitive(hits: List<String>, joined: String) {
         // 「有变化」= 第一次进敏感态、或命中词换了。**只有变化时才动正文与折叠状态**：
         // 同一批词复现时只更新按钮 —— 以前这里无条件 setExpanded(true)，
         // 用户点 ▾ 收起来、900ms 后又被弹开，根本按不住。
@@ -1516,11 +1564,14 @@ internal class Panel(private val a: Activity) {
             setPadding(dp(12), dp(8), dp(12), dp(8))
         }
         go.setOnClickListener {
-            // 记住「这一屏已被你放行」：用屏稳定键，点一次就一直有效（换了屏 / 换了会话自然失效）
+            // 记住「这一屏已被你放行」：屏稳定键 + 「同一个会话的同一段原文」两把都记上 ——
+            // 只记前者的后果是「点了继续分析、闪一下又弹回风险卡」（用户实测报过，见 issue #4）。
             skipSensitiveFor = screenKey
+            skipSensitiveSession = chatName
+            skipSensitiveText = joined
             lastScreenFingerprint = ""
             recheck = true
-            Trace.note("敏感", "用户点了「仍然分析这一条」→ 这一屏放行（不再拦）")
+            Trace.note("敏感", "用户点了「仍然分析这一条」→ 这一段放行（不再拦）")
             handler.post { runCatching { tick() } }
         }
         bodyBox.addView(go, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
@@ -1695,6 +1746,33 @@ internal class Panel(private val a: Activity) {
     }
 
     /**
+     * 作废「当前这一屏是谁」的全部状态。
+     *
+     * 用在**读不出会话名**这种彻底没法判断的情况：宁可什么都不显示，也不能拿上一个会话的名字硬撑 ——
+     * 那正是「换了窗口还在显示上一个窗口的内容」（issue #6）。
+     * 与 [resetPanel] 的区别：那个是「离开聊天页」，这个是「还在聊天页、但不知道是谁」。
+     */
+    private fun dropConversation() {
+        generation++
+        job = Job.None
+        chatName = ""
+        contextRevision = ""
+        lastScreenFingerprint = ""
+        lastFingerprint = ""
+        skipSensitiveFor = ""
+        skipSensitiveSession = ""
+        skipSensitiveText = ""
+        lastMsgs = emptyList()
+        // 缓存按 resultKey 存，而键里含会话名 —— 名字错了缓存也就不可信了，一起清掉。
+        // 代价是下次可能要重新问一次模型；在这个错误路径上，「张冠李戴」比多花一次 token 糟得多。
+        cache.clear()
+        body = Body.None
+        renderedSig = ""
+        sensitiveHits = emptyList()
+        lastMessage = ""
+    }
+
+    /**
      * 把面板复位成「不在场」：作废在飞的任务 + 收起卡片 + 清内容类型与指纹。
      *
      * 抽出来是因为 [onPause] 与 [hideAll] 原本各写了一份，两边的字段清单还不一样 ——
@@ -1813,6 +1891,12 @@ internal class Panel(private val a: Activity) {
 
 /** 「被动收集会话名」的最小间隔：那一屏每 2.6 秒 tick 一次，没必要次次都读整棵视图树。 */
 private const val CONV_PULL_MIN_MS = 15_000L
+
+/**
+ * 连续多少轮读不到会话标题就**不再沿用**上一个会话的名字（见 [Panel.tick] 里那一段）。
+ * 900ms 一轮 × 3 ≈ 2.7 秒 —— 够覆盖「微信切布局时短暂读空」，又不会把「一直读不到」拖成永远。
+ */
+private const val BLANK_TITLE_MAX_TICKS = 3
 
 /** 折叠抖动保护：这个窗口内机器自己最多改 [AUTO_TOGGLE_MAX] 次折叠状态（用户点的不受限）。 */
 private const val AUTO_TOGGLE_WINDOW_MS = 10_000L
