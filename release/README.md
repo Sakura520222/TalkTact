@@ -11,12 +11,12 @@
 
 | 项 | 值 |
 | :--- | :--- |
-| 版本 | **0.8.11**（versionCode 38） |
-| 文件 | `TalkTact-0.8.11.apk`（73,684,496 字节 ≈ 70 MiB） |
-| sha256 | `3cef1a20d9abde6a039f22370aef35b6a4728364f4befe3c7c8e15a7d5718b70` |
-| 来源 | 模块仓库 `Xposed-Modules-Repo/io.github.shibry88_netizen.talktact` 的 release `38-0.8.11` 同名附件 |
-| 释出日期 | 2026-10-08 |
-| 主仓库 release | tag `v0.8.11`（与同版本正式源码 tag 一致） |
+| 版本 | **0.8.12**（versionCode 39） |
+| 文件 | `TalkTact-0.8.12.apk`（73,767,069 字节 ≈ 70 MiB） |
+| sha256 | `e0718644a854f985474866fcab3c11f5c761e8afa34689aaaa87705e7e34c978` |
+| 来源 | 模块仓库 `Xposed-Modules-Repo/io.github.shibry88_netizen.talktact` 的 release `39-0.8.12` 同名附件 |
+| 释出日期 | 2026-10-11 |
+| 主仓库 release | tag `v0.8.12`（与同版本正式源码 tag 一致） |
 
 ## 发布流程
 
@@ -46,5 +46,5 @@
 ## 官网下载链接
 
 ```
-https://github.com/shibry88-netizen/TalkTact/releases/download/v0.8.11/TalkTact-0.8.11.apk
+https://github.com/shibry88-netizen/TalkTact/releases/download/v0.8.12/TalkTact-0.8.12.apk
 ```
