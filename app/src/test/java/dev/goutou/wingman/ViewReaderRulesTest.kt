@@ -44,11 +44,15 @@ class ViewReaderRulesTest {
         assertNotNull(chatTitleScore(title(y = 121), 1000, 1f, 14, 174))
     }
 
-    @Test fun `title centering size and density retain thresholds`() {
+    @Test fun `title centering size and density thresholds`() {
         assertNotNull(chatTitleScore(title(x = 560), 1000, 1f, 14, 120))
         assertNull(chatTitleScore(title(x = 561), 1000, 1f, 14, 120))
+        // 宽度下限从 dp(24) 降到 dp(14)（2 密度下 = 28px），因为 issue #6：
+        // 备注是「单个字」的会话，标题控件只有一个字宽（实测约 47px），旧阈值会把它整条判掉，
+        // 于是标题永远读不出来、模块一直沿用上一个会话的名字。
         assertNotNull(chatTitleScore(title(w = 48, h = 28, x = 476), 1000, 2f, 14, 120))
-        assertNull(chatTitleScore(title(w = 47, h = 28, x = 476), 1000, 2f, 14, 120))
+        assertNotNull(chatTitleScore(title(w = 28, h = 28, x = 486), 1000, 2f, 14, 120))
+        assertNull(chatTitleScore(title(w = 27, h = 28, x = 486), 1000, 2f, 14, 120))
         assertNull(chatTitleScore(title(w = 48, h = 27, x = 476), 1000, 2f, 14, 120))
         assertEquals(1015, chatTitleScore(title(), 1000, 1f, 14, 120))
         assertEquals(1020, chatTitleScore(title(size = 100f), 1000, 1f, 14, 120))
