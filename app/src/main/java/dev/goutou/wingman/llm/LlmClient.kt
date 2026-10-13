@@ -354,6 +354,8 @@ class LlmClient(
         direct: Boolean = false,
         authHeaders: Map<String, String> = emptyMap(),
     ): String {
+        // 先把 body 编成字节：下面要按它的长度走**固定长度上传**（见 setFixedLengthStreamingMode 的说明）
+        val bytes = payload.toByteArray(Charsets.UTF_8)
         val conn = try {
             URL(url).openConnection() as HttpURLConnection
         } catch (t: Throwable) {
@@ -366,6 +368,16 @@ class LlmClient(
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             conn.setRequestProperty("Accept", "application/json")
+            // ⚠️ 长度**必须写死**（且必须在 getOutputStream() 之前调用）。走本地代理时，
+            // 代理那侧是**严格按 Content-Length 读 body** 的（见 ProxyServer），
+            // 读不到就直接回 411 拒绝，而不是替发送侧猜一个空 body。
+            // 不写死的话，安卓的 HttpURLConnection 在 body 没被它自己缓存住时会改用
+            // `Transfer-Encoding: chunked` —— 代理于是拿不到 Content-Length，这条请求整个失败。
+            // 纯文字、短请求小到能命中它内部那点缓冲，所以一直是好的；
+            // 请求体一旦涨大（长聊天记录 / 带上 base64 图片）就越过那条线 ——
+            // 表现是「平时都好，偏偏某几次发不出去」。
+            // 识图那条上传（wechat/ImageOcr.post）当初就是这么修的，这里漏了那一句。
+            conn.setFixedLengthStreamingMode(bytes.size)
             // 「走不走代理」在这里只算一次，凭据和接口头都用它 —— 两者分开判断过一次，出了 401
             val proxyRoute = !direct && viaProxy()
             if (proxyRoute) {
@@ -380,7 +392,7 @@ class LlmClient(
                 authHeaders.forEach { (k, v) -> conn.setRequestProperty(k, v) }
                 if (authHeaders.isEmpty()) conn.setRequestProperty("Authorization", "Bearer ${cfg.apiKey}")
             }
-            conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+            conn.outputStream.use { it.write(bytes) }
 
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream

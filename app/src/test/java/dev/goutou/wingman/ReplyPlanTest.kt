@@ -19,8 +19,10 @@ import dev.goutou.wingman.llm.gradedRiskPrompt
 import dev.goutou.wingman.llm.outputContract
 import dev.goutou.wingman.llm.stripOutputContract
 import dev.goutou.wingman.llm.stripReplyInstruction
+import dev.goutou.wingman.llm.toggledStyleIds
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -327,10 +329,22 @@ class ReplyPlanTest {
         assertEquals(null, customStyle(""))
     }
 
+    /**
+     * 长名字**只截显示，不截 id**。
+     *
+     * 早先 `id` 是拿截断后的名字拼的（`custom:` + 药丸上那个短名），于是两个前 8 个字相同的
+     * 长名字会拼出**同一个 id**：第二个加进来直接报「已经加过了」，从偏好里解码时还会被
+     * `distinctBy { it.id }` 静默丢掉一条。用户看到的是「我明明加了两个，只剩一个」。
+     */
     @Test
-    fun `过长的名字会被截断，不会把卡片撑破`() {
-        val st = customStyle("一二三四五六七八九十十一十二十三")!!
-        assertTrue("超过 8 个字要截掉：${st.label}", st.label.length <= 9)
+    fun `长名字只在药丸上截断，id 用的仍是完整名字`() {
+        val a = customStyle("先用撒娇的语气抱怨他")!!
+        val b = customStyle("先用撒娇的语气抱怨你")!!
+        assertTrue("药丸上要短：${a.displayLabel}", a.displayLabel.length <= 9)
+        assertEquals("全名要留着（进提示词用）", "先用撒娇的语气抱怨他", a.label)
+        assertNotEquals("前 8 个字相同的两个名字不能撞成同一个 id", a.id, b.id)
+        // 而且编码往返之后 id 不能变 —— 变了就等于「重启后勾选丢了」
+        assertEquals(listOf(a, b), decodeCustomStyles(encodeCustomStyles(listOf(a, b))))
     }
 
     @Test
@@ -367,36 +381,104 @@ class ReplyPlanTest {
     }
 
     @Test
-    fun `加完自定义风格它一定在选中集里，不会被末尾挤掉`() {
+    fun `加完自定义风格它一定在勾选集里，不会被末尾挤掉`() {
         val st = customStyle("撒娇", "带点抱怨")!!
-        val plan = ReplyPlan.default()
+        val known = REPLY_STYLES.map { it.id }.toSet() + st.id
         // 界面上「加完直接选中」时就是这么算的：新加的排最前，再按条数截断
-        val next = (listOf(st.id) + plan.styles.map { it.id }).distinct().take(plan.count)
-        val after = ReplyPlan.of(plan.count, next, listOf(st))
-        assertTrue("新加的必须在生效列表里：${after.labels}", after.labels.contains("撒娇"))
-        assertEquals("总数仍然等于条数", plan.count, after.styles.size)
+        val next = toggledStyleIds(DEFAULT_STYLE_IDS, st.id, 3, known)
+        assertEquals("新加的必须排最前，让位的是末尾那个", listOf(st.id, "safe", "humor"), next)
+        assertEquals("总数仍然等于条数", 3, next.size)
+    }
+
+    // ── 多选（点药丸）的规则 ──────────────────────────────────────────────────
+
+    private val builtInIds = REPLY_STYLES.map { it.id }.toSet()
+
+    @Test
+    fun `多选：新点的一定留下，位置不够让末尾的`() {
+        assertEquals(
+            listOf("empathy", "safe", "humor"),
+            toggledStyleIds(listOf("safe", "humor", "advance"), "empathy", 3, builtInIds),
+        )
+    }
+
+    @Test
+    fun `多选：取消一个已勾选的只是少一个`() {
+        assertEquals(
+            listOf("safe", "advance"),
+            toggledStyleIds(listOf("safe", "humor", "advance"), "humor", 3, builtInIds),
+        )
+    }
+
+    @Test
+    fun `多选：点掉最后一个时保持现状`() {
+        assertEquals(listOf("safe"), toggledStyleIds(listOf("safe"), "safe", 1, builtInIds))
     }
 
     /**
-     * 点药丸的规则。以前是「自己算 chosenIds ± id 然后整个存下去」，
-     * 于是存了 4 个而条数只要 3 个 —— 哪 3 个生效取决于 Set 的遍历顺序，
-     * 用户看到的就是「点了个新的，掉的却是别的那个」。
+     * 这一条钉的是**多选最要命的那个 bug**。
+     *
+     * 用户只勾了 1 个风格、条数 3 → 生效表会被自动补齐成 [safe, humor, advance]，
+     * 界面上**三个都亮着**。他点「幽默」想取消 —— 如果拿「生效表」算，就是「减掉幽默」，
+     * 于是只剩 2 个、下一轮又被补齐回幽默，界面上**毫无变化**，用户只会说「点了没反应」。
+     *
+     * 所以规则只看**显式勾选**那份：勾选集里本来就没有幽默，点它等于**勾上**它。
      */
     @Test
-    fun `toggledIds：新点的一定留下，位置不够让末尾的`() {
-        val plan = ReplyPlan.of(3, listOf("safe", "humor", "advance"))
-        assertEquals(listOf("empathy", "safe", "humor"), plan.toggledIds("empathy"))
+    fun `多选：点一个「自动补齐、界面上亮着」的风格不会白点`() {
+        // 生效表里有幽默（补齐进来的），但用户显式只勾了 safe
+        val plan = ReplyPlan.of(3, listOf("safe"))
+        assertEquals(listOf("稳妥", "幽默", "推进"), plan.labels)
+
+        assertEquals(
+            "没真的勾过 → 点它等于勾上它",
+            listOf("humor", "safe"),
+            toggledStyleIds(listOf("safe"), "humor", 3, builtInIds),
+        )
+        assertEquals(
+            "真的勾过 → 点它就能取消，而且不会被补齐回来占住位置",
+            listOf("humor", "advance"),
+            toggledStyleIds(listOf("safe", "humor", "advance"), "safe", 3, builtInIds),
+        )
+    }
+
+    /**
+     * 取消勾选之后**不能**把「补齐进来的」当作用户勾过的存下去 ——
+     * 存下去的话那个风格会一直占着位置，用户再怎么点也去不掉。
+     */
+    @Test
+    fun `多选：取消勾选后剩下的是用户真的勾过的，不是补齐出来的`() {
+        val next = toggledStyleIds(listOf("safe", "humor", "advance"), "advance", 3, builtInIds)
+        assertEquals(listOf("safe", "humor"), next)
+        // 重算规格：只剩 2 个 → 补齐回 3 个，但**配置里仍然只有 2 个**
+        val plan = ReplyPlan.of(3, next)
+        assertEquals(3, plan.styles.size)
+        assertEquals("稳妥", plan.labels[0])
+        assertEquals("幽默", plan.labels[1])
     }
 
     @Test
-    fun `toggledIds：取消一个已选的只是少一个`() {
-        val plan = ReplyPlan.of(3, listOf("safe", "humor", "advance"))
-        assertEquals(listOf("safe", "advance"), plan.toggledIds("humor"))
+    fun `多选：已删掉的自定义风格不会白占一个位置`() {
+        val st = customStyle("撒娇")!!
+        // 自定义风格已经被删了 → 它不在 known 里
+        assertEquals(
+            listOf("safe"),
+            toggledStyleIds(listOf(st.id, "safe"), "safe", 3, builtInIds),
+        )
     }
 
+    /**
+     * 勾选的**顺序**就是「第 1 条走哪个风格」的顺序，落进规格要能对上。
+     * 这也是配置层从 `Set` 换成保序 `List` 的原因：Set 存不住顺序，
+     * 丢了顺序之后用户每次重启看到的第 1/2/3 条风格都在变。
+     */
     @Test
-    fun `toggledIds：取消到最后一个时保持原样`() {
-        val plan = ReplyPlan.of(1, listOf("safe"))
-        assertEquals(listOf("safe"), plan.toggledIds("safe"))
+    fun `多选：先勾的排在后面，但顺序稳定可预测`() {
+        var ids = emptyList<String>()
+        ids = toggledStyleIds(ids, "empathy", 3, builtInIds)
+        ids = toggledStyleIds(ids, "brief", 3, builtInIds)
+        ids = toggledStyleIds(ids, "formal", 3, builtInIds)
+        assertEquals(listOf("formal", "brief", "empathy"), ids)
+        assertEquals(listOf("正式", "简短", "共情"), ReplyPlan.of(3, ids).labels)
     }
 }

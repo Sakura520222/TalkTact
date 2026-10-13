@@ -79,10 +79,11 @@ class BackupTest {
      */
     @Test
     fun `条数与风格能跟着备份往返`() {
-        val cfg = sampleCfg().copy(replyCount = 5, replyStyleIds = setOf("empathy", "brief"))
+        val cfg = sampleCfg().copy(replyCount = 5, replyStyleIds = listOf("empathy", "brief"))
         val r = Backup.import(Backup.export(cfg, sampleRoles(), includeApiKey = true), ConfigData(), emptyList())!!
         assertEquals(5, r.config.replyCount)
-        assertEquals(setOf("empathy", "brief"), r.config.replyStyleIds)
+        // 用 List 比：**顺序也要一样** —— 顺序决定「第 1 条走哪个风格」，丢了等于没导对
+        assertEquals(listOf("empathy", "brief"), r.config.replyStyleIds)
     }
 
     @Test

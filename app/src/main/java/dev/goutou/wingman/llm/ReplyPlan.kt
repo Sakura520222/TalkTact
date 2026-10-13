@@ -21,7 +21,17 @@ data class ReplyStyle(
     val label: String,
     /** 给模型看的策略说明。写清楚「什么时候用哪种」，比只给一个名字有用得多。 */
     val hint: String,
-)
+) {
+    /**
+     * 药丸上显示的名字（长名字截断，免得把卡片撑破）。
+     *
+     * **只在显示时用**，绝不参与 [id]。早先 [customStyle] 是拿截断后的名字拼 id 的，
+     * 于是两个前 8 个字相同的长名字会拼出**同一个 id**：第二个加进来直接报「已经加过了」，
+     * 而从偏好里解码时又会被 `distinctBy { it.id }` 静默丢掉一条 —— 用户看到的是
+     * 「我明明加了两个，只剩一个」。
+     */
+    val displayLabel: String get() = shortStyleLabel(label)
+}
 
 /**
  * 内置的风格清单。
@@ -67,7 +77,7 @@ private const val CUSTOM_ENTRY_SEP = '\n'
 /**
  * 用户自己加的一个风格。
  *
- * 名字用 [shortStyleLabel] 收拾过（压缩空白 + 截断），**收拾完是空的就返回 null** ——
+ * 名字用 [normalizeLabel] 收拾过（只压空白 + 限长，**不截断**），**收拾完是空的就返回 null** ——
  * 让调用方去提示「名字不能为空」，而不是造一个没有名字的风格出来
  *（那种风格在界面上就是一个空药丸，点也不是、删也不是）。
  *
@@ -76,7 +86,8 @@ private const val CUSTOM_ENTRY_SEP = '\n'
  *（三个候选措辞一模一样，只有 `style` 字段不同）。所以空 hint 会兜一句通用说明。
  */
 fun customStyle(label: String, hint: String = ""): ReplyStyle? {
-    val name = shortStyleLabel(limitLabel(label))
+    // 用**未截断**的整名去拼 id（只归一空白），显示时才截（见 [ReplyStyle.displayLabel]）。
+    val name = normalizeLabel(label)
     if (name.isEmpty()) return null
     val cleaned = hint.trim().replace(Regex("\\s+"), " ")
     return ReplyStyle(
@@ -91,6 +102,17 @@ private fun limitLabel(raw: String): String {
     val t = raw.trim()
     return if (t.length <= MAX_CUSTOM_LABEL_LEN) t else t.take(MAX_CUSTOM_LABEL_LEN)
 }
+
+/**
+ * 存进 [ReplyStyle.label] 的那份名字：压掉首尾与连续的空白，按上限截到
+ * [MAX_CUSTOM_LABEL_LEN] 字，**不再往下截**。
+ *
+ * 为什么不在这里直接截成药丸那么短：截出来的名字要拿来拼 [ReplyStyle.id]，
+ * 一截就会有两个长名字撞成同一个 id（见 [ReplyStyle.displayLabel] 的说明）。
+ * 显示那份截断交给 [shortStyleLabel]，两边职责分开。
+ */
+private fun normalizeLabel(raw: String): String =
+    limitLabel(raw).replace(Regex("\\s+"), " ")
 
 /**
  * 自定义风格 ↔ 偏好里的字符串（一行一条：`名称\u0001说明`）。
@@ -147,8 +169,13 @@ data class ReplyPlan(
     /** 风格的中文名，提示词和界面的摘要都用它。 */
     val labels: List<String> get() = styles.map { it.label }
 
-    /** 界面上那行摘要：「3 条 · 稳妥 / 幽默 / 推进」。 */
-    val summary: String get() = "$count 条 · " + labels.joinToString(" / ")
+    /**
+     * 界面上那行摘要：「3 条 · 稳妥 / 幽默 / 推进」。
+     *
+     * 用 [ReplyStyle.displayLabel]（截断过的）而不是全名：自定义风格名最长可以到
+     * [MAX_CUSTOM_LABEL_LEN] 字，几个凑一起会把这一行撑成一整屏。
+     */
+    val summary: String get() = "$count 条 · " + styles.joinToString(" / ") { it.displayLabel }
 
     /**
      * 拼给模型的要求段落。
@@ -189,25 +216,6 @@ data class ReplyPlan(
             append("{\"style\":\"").append(s.label).append("\",\"text\":\"...\"}")
         }
         append("]}")
-    }
-
-    /**
-     * 点一下某个风格（界面上的药丸）之后，**实际要存下去**的那组 id。
-     *
-     * 两个刻意的规则：
-     * ① **新点的一定留下** —— 所以「加」的时候排在**最前**，位置不够时让位的是末尾那个。
-     *   以前这里是「加上去就存」，于是存了 4 个而条数只要 3 个；哪 3 个最终生效取决于
-     *   `Set` 的遍历顺序，用户看到的就是「点了个新的，掉的却是别的那个」。
-     * ② **至少留一种**：把最后一个取消掉时保持原样（等于「取消 = 保持现状」），
-     *   否则风格区会变成空选择，而模型侧又会回落默认三样，表现是「点了没反应」。
-     */
-    fun toggledIds(id: String): List<String> {
-        val cur = styles.map { it.id }
-        if (id in cur) {
-            val next = cur - id
-            return if (next.isEmpty()) cur.take(1) else next
-        }
-        return (listOf(id) + cur).take(count)
     }
 
     companion object {
@@ -252,6 +260,45 @@ data class ReplyPlan(
         /** 老配置 / 默认值：3 条、稳妥+幽默+推进。 */
         fun default(): ReplyPlan = of(DEFAULT_REPLY_COUNT, DEFAULT_STYLE_IDS)
     }
+}
+
+/**
+ * 点一下风格药丸之后，要**存下去**的那组 id（用户显式勾选的，保序）。
+ *
+ * 为什么规则从原来的 `ReplyPlan.toggledIds` 搬出来、并且只看「显式勾选」：
+ * 老规则是拿 [ReplyPlan.styles]（**生效**的那张表）算的，而那张表里掺了自动补齐出来的风格，
+ * 于是有两处必然出问题 ——
+ * ① 点一个「被补齐进来、界面上正亮着」的风格 → 从集合里减掉 → 下一轮又被补齐回来
+ *    → 表现是**点了没反应**；
+ * ② 点一个新风格时被挤掉的是「生效表」的最后一个，那个可能用户**从来没勾过**
+ *    → 表现是「点了个新的，掉的却是别的那个」。
+ * 现在勾选集是唯一的事实来源，补齐只发生在提示词那一侧（见 [ReplyPlan.of]），
+ * 界面上永远只亮着真正勾了的那几个。
+ *
+ * 两条规则：
+ * - **新点的一定留下**：排在**最前**，位置不够时让位的是末尾那个；
+ * - **至少留一种**：点掉最后一个时保持原样（等于「取消 = 保持现状」），
+ *   否则选择会变成空的，而模型侧又会回落默认三样，表现还是「点了没反应」。
+ *
+ * @param current 现在显式勾着的 id（**保序** —— 顺序决定「第 1 条走哪个风格」）
+ * @param known 现在真实存在的风格 id（内置 + 自定义），用来清掉已删除风格的残留
+ * @param count 条数：勾超过条数没有意义，只留前 [count] 个
+ */
+fun toggledStyleIds(
+    current: List<String>,
+    id: String,
+    count: Int,
+    known: Set<String>,
+): List<String> {
+    val n = count.coerceIn(MIN_REPLIES, MAX_REPLIES)
+    // 先清掉「已经删掉的风格」残留，再判重 —— 顺序在这里必须留着
+    val cur = current.map { it.trim() }.filter { it.isNotBlank() && it in known }.distinct()
+    if (id !in known) return cur
+    if (id in cur) {
+        val next = cur - id
+        return if (next.isEmpty()) cur.take(1) else next
+    }
+    return (listOf(id) + cur).distinct().take(n)
 }
 
 /** 按配置算规格的便捷入口（给 [dev.goutou.wingman.config.ConfigData] 用，避免那边 import 整个 llm 包）。 */

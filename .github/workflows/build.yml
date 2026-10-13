@@ -186,7 +186,25 @@ jobs:
           name: screenshots
           path: app/build/screenshots/
           if-no-files-found: ignore
+      # 产物名里带上**提交号**。
+      # ⚠️ 只靠版本号已经认不出包了：版本号被固定在 0.8.12(39)，各分支、各次构建出的
+      # 包**全都叫同一个名字**（下载到的是哪一次构建完全看不出来 —— 排障时为此白绕过好几轮：
+      # 真机上跑的是修好前的包，现象和没改**一模一样**，谁也说不清手上是哪一份）。
+      # 现在产物叫 TalkTact-<versionName>(<versionCode>)-<提交号>-debug.apk，
+      # 下载完看一眼提交号就知道是哪次构建、哪条分支出的。
+      - name: rename apk with version and sha
+        run: |
+          set -e
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
+          V=$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+          C=$(sed -n 's/.*versionCode *= *\([0-9]*\).*/\1/p' app/build.gradle.kts | head -1)
+          S=$(git rev-parse --short HEAD)
+          if [ -z "$V" ] || [ -z "$C" ] || [ -z "$S" ]; then echo "读不到版本号或提交号"; exit 1; fi
+          OUT="app/build/outputs/apk/debug/TalkTact-${V}(${C})-${S}-debug.apk"
+          cp "$APK" "$OUT"
+          echo "产物：$OUT"
+          sha256sum "$OUT"
       - uses: actions/upload-artifact@v4
         with:
           name: apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/debug/TalkTact-*.apk

@@ -101,7 +101,9 @@ object Backup {
         // 老备份没有这两个键 → asInt/asArr 返回 null → 不动，保持默认值（3 条 / 老三样）
         c["replyCount"].asInt()?.let { cfg = cfg.copy(replyCount = it.coerceIn(1, 6)) }
         c["replyStyles"].asArr()?.let { arr ->
-            cfg = cfg.copy(replyStyleIds = arr.mapNotNull { it.asStr() }.filter { it.isNotBlank() }.toSet())
+            // **保留数组里的顺序**（不要再 toSet）：顺序决定「第 1 条走哪个风格」，
+            // 而备份就是为了换机后一模一样，顺序变了等于没导对。
+            cfg = cfg.copy(replyStyleIds = arr.mapNotNull { it.asStr() }.filter { it.isNotBlank() }.distinct())
         }
         // 老备份没有这个键 → asStr 返回 null → 不动（保持当前配置里已有的自定义风格）
         c["replyCustomStyles"].asStr()?.let {

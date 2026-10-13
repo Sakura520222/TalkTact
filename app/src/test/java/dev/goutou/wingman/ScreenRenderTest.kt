@@ -216,7 +216,7 @@ class ScreenRenderTest {
     @Test
     fun `高级设置里能自己输入添加风格`() {
         page { AdvancedScreen(store, store.load(), {}, {}, {}, {}) }
-        rule.onNodeWithText("自定义风格（自己输入；加完就直接选中，用法和上面 8 种完全一样）").assertExists()
+        rule.onNodeWithText("自定义风格（加完直接选中，和上面同等）").assertExists()
         rule.onNodeWithText("添加风格").assertExists()
     }
 
@@ -257,10 +257,10 @@ class ScreenRenderTest {
      */
     @Test
     fun `改条数或风格会同步重拼提示词快照`() {
-        store.saveReplyPlan(3, setOf("safe", "humor", "advance"))
+        store.saveReplyPlan(3, listOf("safe", "humor", "advance"))
         val before = store.load().prompt
 
-        store.saveReplyPlan(5, setOf("empathy", "brief"))
+        store.saveReplyPlan(5, listOf("empathy", "brief"))
         val after = store.load().prompt
 
         assertTrue("换规格后提示词快照必须变，否则提示词页看不到任何变化", before != after)
@@ -282,7 +282,7 @@ class ScreenRenderTest {
      */
     @Test
     fun `反复改条数不会让提示词里叠加出多份规格段`() {
-        repeat(4) { i -> store.saveReplyPlan(2 + i, setOf("safe", "humor", "advance")) }
+        repeat(4) { i -> store.saveReplyPlan(2 + i, listOf("safe", "humor", "advance")) }
         val p = store.load().prompt
         assertEquals(1, Regex("【这次要几条、什么风格】").findAll(p).count())
         assertEquals("最后一次改的条数要生效", true, p.contains("恰好给 5 条"))
@@ -296,7 +296,7 @@ class ScreenRenderTest {
     fun `切到满血版 skill 时示例也跟着当前规格走`() {
         val cur = store.load()
         store.save(cur.copy(prompt = FULL_PROMPT))
-        store.saveReplyPlan(4, setOf("empathy", "direct"))
+        store.saveReplyPlan(4, listOf("empathy", "direct"))
 
         val p = store.load().prompt
         // 规格段：4 条、风格共情/直接
