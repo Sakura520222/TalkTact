@@ -5,6 +5,7 @@ import dev.goutou.wingman.config.ConfigData
 import dev.goutou.wingman.config.Role
 import dev.goutou.wingman.config.Roles
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -67,5 +68,39 @@ class BackupTest {
         assertNull(Backup.import("", ConfigData(), emptyList()))
         assertNull(Backup.import("不是 json", ConfigData(), emptyList()))
         assertNull(Backup.import("""{"app":"TalkTact"}""", ConfigData(), emptyList()))
+    }
+
+    /**
+     * 条数与风格必须跟着备份走。
+     *
+     * 漏了这两个字段的后果很具体：用户导出→换机→导入，装回来的是默认三样，
+     * 而界面上看不出任何「没导进来」的痕迹。
+     */
+    @Test
+    fun `条数与风格能跟着备份往返`() {
+        val cfg = sampleCfg().copy(replyCount = 5, replyStyleIds = setOf("empathy", "brief"))
+        val r = Backup.import(Backup.export(cfg, sampleRoles(), includeApiKey = true), ConfigData(), emptyList())!!
+        assertEquals(5, r.config.replyCount)
+        assertEquals(setOf("empathy", "brief"), r.config.replyStyleIds)
+    }
+
+    @Test
+    fun `默认设置不往备份里塞多余键 老备份缺这两项时保持默认`() {
+        // 默认值不该写进文件 —— 否则老备份一导入就凭空多出两个键
+        val text = Backup.export(sampleCfg(), sampleRoles(), includeApiKey = true)
+        assertFalse(text.contains("replyCount"))
+        assertFalse(text.contains("replyStyles"))
+        // 老备份里没有这两个键 → 导入后仍是默认（3 条 / 无指定 = 老三样）
+        val legacy = """{"app":"TalkTact","schema":1,"config":{"ctx":8}}"""
+        val r = Backup.import(legacy, ConfigData(), emptyList())!!
+        assertEquals(3, r.config.replyCount)
+        assertTrue(r.config.replyStyleIds.isEmpty())
+    }
+
+    @Test
+    fun `备份里越界的条数会被夹回合法区间`() {
+        val legacy = """{"app":"TalkTact","schema":1,"config":{"replyCount":999}}"""
+        val r = Backup.import(legacy, ConfigData(), emptyList())!!
+        assertEquals(6, r.config.replyCount)
     }
 }

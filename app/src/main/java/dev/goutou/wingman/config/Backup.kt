@@ -3,8 +3,10 @@ package dev.goutou.wingman.config
 import dev.goutou.wingman.llm.Json
 import dev.goutou.wingman.llm.JsonValue
 import dev.goutou.wingman.llm.arr
+import dev.goutou.wingman.llm.asArr
 import dev.goutou.wingman.llm.asBool
 import dev.goutou.wingman.llm.asDouble
+import dev.goutou.wingman.llm.asInt
 import dev.goutou.wingman.llm.asObj
 import dev.goutou.wingman.llm.asStr
 import dev.goutou.wingman.llm.bool
@@ -43,6 +45,10 @@ object Backup {
         c["bgDim"] = num(cfg.bgDim)
         c["skillId"] = str(cfg.skillId)
         c["mentorAdvanced"] = bool(cfg.mentorAdvanced)
+        // 候选条数与风格：漏掉的话「导出→换机→导入」会把用户的这条设置悄悄退回默认三样。
+        // 只在**非默认**时才写 —— 免得老备份文件一律多出这两个键。
+        if (cfg.replyCount != 3) c["replyCount"] = num(cfg.replyCount)
+        if (cfg.replyStyleIds.isNotEmpty()) c["replyStyles"] = arr(cfg.replyStyleIds.map { str(it) })
 
         val fields = LinkedHashMap<String, JsonValue>()
         fields["app"] = str("TalkTact")
@@ -84,6 +90,11 @@ object Backup {
         c["bgDim"].asDouble()?.let { cfg = cfg.copy(bgDim = it.toFloat().coerceIn(0f, 0.8f)) }
         c["skillId"].asStr()?.takeIf { it.isNotBlank() }?.let { cfg = cfg.copy(skillId = it) }
         c["mentorAdvanced"].asBool()?.let { cfg = cfg.copy(mentorAdvanced = it) }
+        // 老备份没有这两个键 → asInt/asArr 返回 null → 不动，保持默认值（3 条 / 老三样）
+        c["replyCount"].asInt()?.let { cfg = cfg.copy(replyCount = it.coerceIn(1, 6)) }
+        c["replyStyles"].asArr()?.let { arr ->
+            cfg = cfg.copy(replyStyleIds = arr.mapNotNull { it.asStr() }.filter { it.isNotBlank() }.toSet())
+        }
 
         val imported = root["roles"]?.let { Roles.decode(Json.encode(it)) }.orEmpty()
         val byKey = LinkedHashMap<String, Role>()

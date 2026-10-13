@@ -100,6 +100,11 @@ import dev.goutou.wingman.config.GLASS_QUALITY_LOW
 import dev.goutou.wingman.config.Role
 import dev.goutou.wingman.config.Roles
 import dev.goutou.wingman.llm.BUILT_IN_SKILLS
+import dev.goutou.wingman.llm.ReplyPlan
+import dev.goutou.wingman.llm.REPLY_STYLES
+import dev.goutou.wingman.llm.applyReplyPlan
+import dev.goutou.wingman.llm.coreOf
+import dev.goutou.wingman.llm.replyPlanOf
 import dev.goutou.wingman.llm.Geo
 import dev.goutou.wingman.llm.LlmClient
 import dev.goutou.wingman.llm.LlmException
@@ -751,6 +756,7 @@ fun TrialScreen(store: ConfigStore, glassAlpha: Float) {
                                         msgs = msgs,
                                         roleContext = null,
                                         waitMs = gradedWaitMs(conf.probeReplyMs, conf.probeRiskMs),
+                                        plan = ReplyPlan.of(conf.replyCount, conf.replyStyleIds.toList()),
                                     )
                                 }
                                 suggestion = out.suggestion
@@ -1043,8 +1049,11 @@ fun MentorScreen(store: ConfigStore, glassAlpha: Float, onSaved: () -> Unit) {
                     }
                     Button(
                         onClick = {
-                            // 内容跟哪个内置 skill 逐字一样，就还算那个 skill；动过了才算「自定义」
-                            val known = BUILT_IN_SKILLS.firstOrNull { it.prompt == text }?.id
+                            // 内容跟哪个内置 skill 逐字一样，就还算那个 skill；动过了才算「自定义」。
+                            // 比的是**正文**（去掉规格段和契约），不是整段逐字比：
+                            // 用户改过条数/风格之后，尾部两段会跟着重拼，
+                            // 整段比对会把内置 skill 误判成「自定义」，再切一次就把 skillId 冲掉了。
+                            val known = BUILT_IN_SKILLS.firstOrNull { coreOf(it.prompt) == coreOf(text) }?.id
                             persist(text, known ?: "custom", unlimited = true)
                         },
                         modifier = Modifier.fillMaxWidth().height(48.dp),
@@ -1065,7 +1074,8 @@ fun MentorScreen(store: ConfigStore, glassAlpha: Float, onSaved: () -> Unit) {
                 Text("点一下直接启用（会替换当前提示词）", fontSize = 13.sp, color = palette.sub)
                 Spacer(Modifier.height(4.dp))
                 BUILT_IN_SKILLS.forEach { skill ->
-                    val selected = cfg.skillId == skill.id && cfg.prompt == skill.prompt
+                    // 同上：比正文，不比整段 —— 否则改过条数后当前 skill 会被显示成「没选中」。
+                    val selected = cfg.skillId == skill.id && coreOf(cfg.prompt) == coreOf(skill.prompt)
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -1073,7 +1083,20 @@ fun MentorScreen(store: ConfigStore, glassAlpha: Float, onSaved: () -> Unit) {
                             .clip(RoundedCornerShape(RadiusR2))
                             .background(palette.glassTint.copy(alpha = if (selected) 0.18f else 0.09f))
                             .clickable {
-                                store.save(store.load().copy(prompt = skill.prompt, skillId = skill.id, maxTokens = 0))
+                                // 内置 skill 存的是「默认三条」那份快照（[BUILT_IN_SKILLS] 是常量，
+                                // 不该因为用户改过设置就被改写）。直接存它会把用户选的条数和风格丢掉 ——
+                                // 所以按**当前**规格重拼一份再存，正文照样是内置 skill 的。
+                                val cur = store.load()
+                                store.save(
+                                    cur.copy(
+                                        prompt = applyReplyPlan(
+                                            skill.prompt,
+                                            replyPlanOf(cur.replyCount, cur.replyStyleIds.toList()),
+                                        ),
+                                        skillId = skill.id,
+                                        maxTokens = 0,
+                                    )
+                                )
                                 cfg = store.load()
                                 text = cfg.prompt
                                 tweak = false
@@ -1536,7 +1559,22 @@ fun AdvancedScreen(
         onSaved()
     }
 
-    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+    /**
+ * 「候选条数 + 风格」也**立刻落盘**（原因见 `ConfigStore.saveReplyPlan`）。
+ *
+ * 这两个是纯选择型的：用户点「5 条」时期待的就是下次给 5 条。让它只改了草稿、
+ * 混在页底那个「保存」后面，一定会出现「我明明选了怎么还是 3 条」。
+ * 同步回草稿时**只动这两个字段**，别把这一页还在编辑的接口地址一起定死。
+ */
+fun saveReplyPlan(count: Int, styleIds: Set<String>) {
+    store.saveReplyPlan(count, styleIds)
+    val fresh = store.load()
+    d = d.copy(replyCount = fresh.replyCount, replyStyleIds = fresh.replyStyleIds)
+    persisted = fresh
+    onSaved()
+}
+
+val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
             backupNote = try {
                 context.contentResolver.openOutputStream(uri)?.use { out ->
@@ -2144,6 +2182,78 @@ fun AdvancedScreen(
                     color = palette.sub,
                 )
             }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        GlassCard(d.glassAlpha) {
+            Text("每次给几条、什么风格", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+            Spacer(Modifier.height(8.dp))
+
+            val plan = ReplyPlan.of(d.replyCount, d.replyStyleIds.toList())
+            // 归一化后的「真正会用到的风格」—— 下方提示与按钮选中态都以它为准，
+            // 而不是用户原始勾选：选了 2 种却要 5 条时会自动补齐，
+            // 只显示原始勾选会让人以为那 3 条不存在。
+            val chosenIds = plan.styles.map { it.id }.toSet()
+
+            Text("条数", fontSize = 13.sp, color = palette.sub)
+            Spacer(Modifier.height(6.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                for (n in dev.goutou.wingman.llm.MIN_REPLIES..dev.goutou.wingman.llm.MAX_REPLIES) {
+                    GlassPill("$n", plan.count == n, Modifier.weight(1f)) {
+                        // 存的是**当前生效**的风格（已补齐过），不是用户原始勾选 ——
+                        // 否则「选了 2 种 + 要 5 条」这个组合每点一次条数就会重算一次补齐，
+                        // 连着调几次条数之后存进去的就不再是用户最初选的那几种了。
+                        saveReplyPlan(n, chosenIds)
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+
+            Text("风格（可多选；勾几种就按几种写，选不够会按顺序补齐）", fontSize = 13.sp, color = palette.sub)
+            Spacer(Modifier.height(6.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                REPLY_STYLES.chunked(4).forEach { rowStyles ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        rowStyles.forEach { st ->
+                            GlassPill(
+                                st.label,
+                                st.id in chosenIds,
+                                Modifier.weight(1f),
+                            ) {
+                                // 至少留一种：全取消会让「风格」这个选择彻底失去意义，
+                                // 而模型侧又会回落到默认三样 —— 表现就是「点了没反应」。
+                                // 最后一个取消的会自己变回选中（即「取消 = 保持现状」）。
+                                val next = if (st.id in chosenIds) chosenIds - st.id else chosenIds + st.id
+                                saveReplyPlan(d.replyCount, if (next.isEmpty()) setOf(st.id) else next)
+                            }
+                        }
+                        // 一行放不满时用空 Spacer 补齐权重，避免最后几个被拉得特别宽
+                        repeat(4 - rowStyles.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+
+            HintText(
+                "当前：${plan.summary}。这段会写进提示词，让模型按你选的类型各写一条 —— " +
+                    "所以「风格」不是给候选贴标签，是真的在要求模型换着写。",
+                fontSize = 13.sp,
+                color = palette.sub,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "点一下就生效（立刻落盘，不用等页底那个「保存」）。条数给多了，每条会被摊薄、更容易雷同；" +
+                    "2~3 条通常最实用。",
+                fontSize = 13.sp,
+                color = palette.ok,
+            )
         }
 
         GroupTitle("识别")

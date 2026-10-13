@@ -23,6 +23,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.goutou.wingman.config.ConfigStore
 import dev.goutou.wingman.config.Keys
 import dev.goutou.wingman.config.PREF_NAME
+import dev.goutou.wingman.llm.FULL_PROMPT
+import dev.goutou.wingman.llm.coreOf
 import dev.goutou.wingman.ui.AdvancedScreen
 import dev.goutou.wingman.ui.ChatCandidatesScreen
 import dev.goutou.wingman.ui.GlassCard
@@ -32,6 +34,7 @@ import dev.goutou.wingman.ui.SettingsScreen
 import dev.goutou.wingman.ui.TrialScreen
 import dev.goutou.wingman.ui.drawBackdropArt
 import dev.goutou.wingman.ui.rememberBackdrop
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -188,6 +191,22 @@ class ScreenRenderTest {
         capture("advanced")
     }
 
+    /**
+     * 「条数 / 风格」那张新卡的入口断言。
+     *
+     * 可以断言到后面几个分组（「图片文字识别（OCR）」等）也在，是因为这一页用的是
+     * `verticalScroll` 的 Column 而不是 LazyColumn —— 所有子节点都会进语义树，
+     * **加长页面不会把它们从树里挤掉**。换成 LazyColumn 的话就得改成滚动后再断言。
+     *
+     * 只断言卡片标题，不逐个断言 8 个风格名：那 8 个 pill 在 4 列布局里换行，
+     * 一旦以后调整成别的列数/顺序，逐个断言就会毫无理由地红 —— 而卡片在不在才是要紧的。
+     */
+    @Test
+    fun `高级设置里有条数与风格的选择`() {
+        page { AdvancedScreen(store, store.load(), {}, {}, {}, {}) }
+        rule.onNodeWithText("每次给几条、什么风格").assertExists()
+    }
+
     @Test
     fun `拉取到的联系人页能渲染 且有搜索框和两段名单`() {
         // 造一份「拉回来的名单」，其中老张已经在白名单里 —— 两段（还没加进去的 / 已经在白名单里的）都要画出来
@@ -211,5 +230,67 @@ class ScreenRenderTest {
         page(dark = true) { AdvancedScreen(store, store.load(), {}, {}, {}, {}) }
         rule.onNodeWithText("生成模式").assertExists()
         capture("advanced-dark")
+    }
+
+    /**
+     * 改条数/风格之后，**提示词页显示的那份文本也跟着变**。
+     *
+     * 这是踩过的坑：规格重拼只放在调用时（`LlmClient` 里），
+     * 于是实际行为已经变了、设置页存了新值，唯独「提示词」页那份快照纹丝不动 ——
+     * 三个地方有两个是新的，只有给人看的那个是旧的，比「真没生效」还难查。
+     *
+     * 所以这里断的是**落盘的那份 prompt 本身**，不是界面上某个 Text 节点：
+     * 界面那条已经被「高级设置里有条数与风格的选择」覆盖了。
+     */
+    @Test
+    fun `改条数或风格会同步重拼提示词快照`() {
+        store.saveReplyPlan(3, setOf("safe", "humor", "advance"))
+        val before = store.load().prompt
+
+        store.saveReplyPlan(5, setOf("empathy", "brief"))
+        val after = store.load().prompt
+
+        assertTrue("换规格后提示词快照必须变，否则提示词页看不到任何变化", before != after)
+        assertTrue("新快照要写上新的条数，实际含：$after", after.contains("恰好给 5 条"))
+        assertTrue("风格清单也要跟着换，含共情/简短：$after", after.contains("共情") && after.contains("简短"))
+        assertTrue("旧条数不该残留：$after", !after.contains("恰好给 3 条"))
+        // 正文是用户的，不能因为改了条数就被换掉
+        assertTrue("正文必须保留", coreOf(before) == coreOf(after))
+    }
+
+    /**
+     * 反复改条数不能把提示词越改越乱（规格段会重复叠加 / 契约会重复追加）。
+     *
+     * 重拼是「摘掉旧的两段再拼新的」，这里确认它真的幂等 ——
+     * 如果某次没摘干净，用户每点一次设置就多一段，提示词会越滚越长还多花 token。
+     *
+     * 只断规格段标题，不拿 `"replies":` 的出现次数当指标：满血版 skill 正文里的
+     * few-shot 示例本身也带 replies，那个数天然是 2，用它做判据会在换 skill 时误报。
+     */
+    @Test
+    fun `反复改条数不会让提示词里叠加出多份规格段`() {
+        repeat(4) { i -> store.saveReplyPlan(2 + i, setOf("safe", "humor", "advance")) }
+        val p = store.load().prompt
+        assertEquals(1, Regex("【这次要几条、什么风格】").findAll(p).count())
+        assertEquals("最后一次改的条数要生效", true, p.contains("恰好给 5 条"))
+    }
+
+    /**
+     * 内置 skill 的 few-shot 示例里也有 replies —— 换规格时它必须跟着换，
+     * 否则满血版会出现「正文示例说 3 条、契约说 5 条」这种自相矛盾的提示词。
+     */
+    @Test
+    fun `切到满血版 skill 时示例也跟着当前规格走`() {
+        val cur = store.load()
+        store.save(cur.copy(prompt = FULL_PROMPT))
+        store.saveReplyPlan(4, setOf("empathy", "direct"))
+
+        val p = store.load().prompt
+        // 规格段：4 条、风格共情/直接
+        assertTrue("规格段要写 4 条：$p", p.contains("恰好给 4 条"))
+        assertTrue("规格段要写共情：$p", p.contains("共情"))
+        // few-shot 示例：4 个 style 元素
+        val example = p.substringAfter("【例子】").substringBefore("只输出下面这个 JSON")
+        assertEquals("few-shot 示例要给 4 条：$example", 4, Regex("\"style\":").findAll(example).count())
     }
 }

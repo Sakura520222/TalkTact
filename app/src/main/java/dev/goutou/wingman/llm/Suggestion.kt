@@ -36,8 +36,15 @@ object SuggestionParser {
      *   默认 true（直通模式那一路必须有候选）。
      *   **分级模式的「风险评估」那一路契约里根本没有 replies** —— 再按「必须有候选」判，
      *   就会把一次完全正确的调用报成「模型没给出可用回复」，整条风险路都被判失败（真踩过）。
+     * @param maxReplies 最多保留几条。以前写死 4（比提示词要求的 3 多留一条容错），
+     *   现在跟着用户在设置页选的条数走 —— 上限仍然比要求值多留一条，
+     *   这样模型多给一条时不会凭空把它丢掉（丢掉的话 [Suggestion.best] 的下标就全错了）。
      */
-    fun parse(raw: String, requireReplies: Boolean = true): Suggestion {
+    fun parse(
+        raw: String,
+        requireReplies: Boolean = true,
+        maxReplies: Int = DEFAULT_REPLY_COUNT + 1,
+    ): Suggestion {
         // 先按正常路径抠 JSON；抠不出来再试「截断抢救」——被 max_tokens 截断时 JSON 是残缺的，
         // 但里面已经说完的那几条回复还有救，总比整条报错强。
         val strictRoot = extractJson(raw)?.let { Json.parse(it)?.asObj() }
@@ -99,7 +106,7 @@ object SuggestionParser {
             )
         }
 
-        val kept = replies.take(4)
+        val kept = replies.take(maxReplies.coerceIn(1, MAX_REPLIES + 1))
         return Suggestion(
             intent = rawIntent.ifEmpty { "未识别" },
             risk = normalizeRisk(rawRisk),

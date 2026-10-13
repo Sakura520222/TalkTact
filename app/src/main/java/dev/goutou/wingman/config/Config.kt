@@ -3,6 +3,10 @@ package dev.goutou.wingman.config
 import android.content.Context
 import android.content.SharedPreferences
 import dev.goutou.wingman.llm.DEFAULT_PROMPT
+import dev.goutou.wingman.llm.MAX_REPLIES
+import dev.goutou.wingman.llm.MIN_REPLIES
+import dev.goutou.wingman.llm.applyReplyPlan
+import dev.goutou.wingman.llm.replyPlanOf
 
 /**
  * 装到系统里的包名（= build.gradle 里的 applicationId）。
@@ -83,6 +87,10 @@ object Keys {
     const val GLASS_QUALITY = "glass_quality"
     /** 严格 JSON 输出：请求里带 response_format=json_object（只作用于「生成候选」） */
     const val JSON_MODE = "json_mode"
+    /** 每次给几条候选回复（1..6，见 llm/ReplyPlan.kt）。默认 3，和老行为一致。 */
+    const val REPLY_COUNT = "reply_count"
+    /** 要用哪几种回复风格（存 [ReplyStyle.id] 的集合，见 llm/ReplyPlan.kt 的 REPLY_STYLES）。 */
+    const val REPLY_STYLES = "reply_styles"
     /** 「接口自检」量到的两路延迟（ms）；设置页的公告栏与「两路对齐等待」都用它 */
     const val PROBE_REPLY_MS = "probe_reply_ms"
     const val PROBE_RISK_MS = "probe_risk_ms"
@@ -213,6 +221,20 @@ data class ConfigData(
      */
     val jsonMode: Boolean = false,
     /**
+     * 每次给几条候选回复（1..[dev.goutou.wingman.llm.MAX_REPLIES]，默认 3）。
+     *
+     * 以前这个数是写死的（解析时 `take(4)`、提示词里写「3 条」），现在由用户在设置页选。
+     * 越界在读取时就夹紧（见 llm/ReplyPlan.kt 的 [dev.goutou.wingman.llm.ReplyPlan.of]）。
+     */
+    val replyCount: Int = 3,
+    /**
+     * 要用的回复风格（存的是 [dev.goutou.wingman.llm.ReplyStyle.id]）。
+     *
+     * 默认空 = 用 [dev.goutou.wingman.llm.DEFAULT_STYLE_IDS]（稳妥 / 幽默 / 推进），
+     * 和三个内置 skill 提示词里原本写死的三样一致 —— 老用户升级后行为不变。
+     */
+    val replyStyleIds: Set<String> = emptySet(),
+    /**
      * 「接口自检」量到的两路延迟（毫秒；0 = 没测过）。
      * 和 [selfStyleEnabled] 一样是**只读**字段：由 [ConfigStore.saveProbeMs] 单独写，save() 不碰。
      */
@@ -309,6 +331,10 @@ data class ConfigData(
             model2 = p.getString(Keys.MODEL2, "").orEmpty(),
             glassQuality = p.getString(Keys.GLASS_QUALITY, GLASS_QUALITY_AUTO).orEmpty().ifBlank { GLASS_QUALITY_AUTO },
             jsonMode = p.getBoolean(Keys.JSON_MODE, false),
+            replyCount = p.getInt(Keys.REPLY_COUNT, 3).coerceIn(1, 6),
+            replyStyleIds = p.getStringSet(Keys.REPLY_STYLES, emptySet()).orEmpty()
+                .filter { it.isNotBlank() }
+                .toSet(),
             probeReplyMs = p.getLong(Keys.PROBE_REPLY_MS, 0L).coerceAtLeast(0L),
             probeRiskMs = p.getLong(Keys.PROBE_RISK_MS, 0L).coerceAtLeast(0L),
             proxyEnabled = p.getBoolean(Keys.PROXY_ON, false),
@@ -375,6 +401,11 @@ class ConfigStore(context: Context) {
             .putString(Keys.MODEL2, d.model2.trim())
             .putString(Keys.GLASS_QUALITY, d.glassQuality)
             .putBoolean(Keys.JSON_MODE, d.jsonMode)
+            .putInt(Keys.REPLY_COUNT, d.replyCount.coerceIn(1, 6))
+            .putStringSet(
+                Keys.REPLY_STYLES,
+                d.replyStyleIds.map { it.trim() }.filter { it.isNotBlank() }.toHashSet(),
+            )
             .putBoolean(Keys.PROXY_ON, d.proxyEnabled)
             .putInt(Keys.PROXY_PORT, d.proxyPort.coerceIn(1024, 65535))
             .putBoolean(Keys.WHITELIST_ON, d.whitelistEnabled)
@@ -493,6 +524,35 @@ class ConfigStore(context: Context) {
      */
     fun saveGraded(graded: Boolean) {
         sp.edit().putBoolean(Keys.GRADED, graded).apply()
+    }
+
+    /**
+     * 只改「候选条数 + 风格」这两项 + **按新规格重拼提示词快照**，立刻落盘。
+     *
+     * 重拼这一下是必须的，不是顺手做的：[Keys.PROMPT] 存的是**完整提示词**，
+     * 「提示词」页直接把这份快照显示出来。而规格段和输出契约是拼在正文末尾的两段 ——
+     * 不重拼的话，用户在设置里把条数从 3 改成 5，实际发出去的确实变了（调用时还会再拼一次，
+     * 见 `llm/applyReplyPlan`），但「提示词」页看上去一个字没动。
+     *
+     * 这正是「改了没反应」最难查的一种：设置页存的是新值、行为也变了，
+     * 唯一对不上的是给人看的那份文本，比真没生效还费时间。
+     *
+     * 用 [dev.goutou.wingman.llm.applyReplyPlan] 重拼，而不是直接拿内置 core 覆盖：
+     * 「提示词」页是自由编辑的，用户可能自己写过正文，覆盖掉就等于删他的东西。
+     * 它只换掉规格段和契约两段，正文原样保留。
+     */
+    fun saveReplyPlan(count: Int, styleIds: Set<String>) {
+        val ids = styleIds.map { it.trim() }.filter { it.isNotBlank() }.toSet()
+        val n = count.coerceIn(MIN_REPLIES, MAX_REPLIES)
+        val rebuilt = applyReplyPlan(
+            sp.getString(Keys.PROMPT, null).orEmpty().ifBlank { DEFAULT_PROMPT },
+            replyPlanOf(n, ids.toList()),
+        )
+        sp.edit()
+            .putInt(Keys.REPLY_COUNT, n)
+            .putStringSet(Keys.REPLY_STYLES, ids)
+            .putString(Keys.PROMPT, rebuilt)
+            .apply()
     }
 
     /**

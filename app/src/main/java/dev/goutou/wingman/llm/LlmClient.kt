@@ -51,6 +51,14 @@ class LlmClient(
     private val shape: ApiShape get() = shapeOf(cfg.apiShape)
 
     /**
+     * 这一轮要用几条、什么风格（用户在设置页选的，见 config/ConfigData.replyCount）。
+     *
+     * 在这里算一次，不到处现算 —— 好处是**同一轮调用里规格是稳定的**：
+     * 分级模式两路并行时算两次也不会算出两个不一样的结果。
+     */
+    private val plan: ReplyPlan get() = ReplyPlan.of(cfg.replyCount, cfg.replyStyleIds.toList())
+
+    /**
      * 出站地址。
      *
      * 开了本地代理就走本机回环（路径写死在 [ProxyProtocol] 里）：那段代码被注入在微信进程里，
@@ -103,6 +111,12 @@ class LlmClient(
         requireReady()
         if (msgs.isEmpty()) throw LlmException("没读到聊天内容", null)
 
+        // 传进来的 systemText 是**当初那次配置下**拼好、存进偏好的快照。
+        // 用户在设置页改了条数/风格之后它就是过期的（里面还写着「恰好给 3 条」），
+        // 所以这里按当前规格重拼一遍：只换掉「规格要求」和「输出契约」两段，正文一个字不动
+        //（提示词页是自由编辑的，不能拿内置 core 覆盖用户自己写的字）。
+        val systemBase = applyReplyPlan(systemText, plan)
+
         val start = System.currentTimeMillis()
         // trace 要能原样看到「发出去的是什么」，所以用传进来的那份，而不是回头读 cfg
         // 顺序刻意是「跨请求不变的东西在前、每次都变的东西在后」：
@@ -137,7 +151,7 @@ class LlmClient(
         var attempt = 0
         var tokensTotal = 0
         while (true) {
-            val system = if (attempt == 0) systemText else systemText + "\n\n" + JSON_NUDGE
+            val system = if (attempt == 0) systemBase else systemBase + "\n\n" + JSON_NUDGE
             try {
                 val req = requestFor(system)
                 val root = parseResponse(post(outboundUrl(req.url), req.body, authHeaders = req.authHeaders))
@@ -150,7 +164,8 @@ class LlmClient(
                 trace(system, userText, content)
                 tokensTotal += reply.tokens
                 val parsed = try {
-                    SuggestionParser.parse(content, requireReplies)
+                    // 最多保留 plan.count + 1 条：模型多给一条也不丢（丢了 best 的下标就全错位）
+                    SuggestionParser.parse(content, requireReplies, maxReplies = plan.count + 1)
                 } catch (e: LlmException) {
                     trace(system, userText, "（解析失败，${if (attempt == 0) "补正后重试一次" else "不再重试"}）${e.message}\n---\n$content")
                     if (attempt == 0 && e.retryable) {

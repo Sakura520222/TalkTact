@@ -32,6 +32,7 @@ import dev.goutou.wingman.llm.isReplyTooLong
 import dev.goutou.wingman.proxy.ProxyProtocol
 import dev.goutou.wingman.llm.REWRITE_PRESETS
 import dev.goutou.wingman.llm.Reply
+import dev.goutou.wingman.llm.ReplyPlan
 import dev.goutou.wingman.llm.Suggestion
 import dev.goutou.wingman.config.SELF_ROLE_KEY
 
@@ -1299,6 +1300,8 @@ internal class Panel(private val a: Activity) {
                         msgs = msgs,
                         roleContext = roleContext,
                         waitMs = gradedWaitMs(cfg.probeReplyMs, cfg.probeRiskMs),
+                        // 条数/风格跟着配置走，直通与分级两条路的候选条数才一致
+                        plan = ReplyPlan.of(cfg.replyCount, cfg.replyStyleIds.toList()),
                     )
                     suggestion = out.suggestion
                     tokens = out.totalTokens
