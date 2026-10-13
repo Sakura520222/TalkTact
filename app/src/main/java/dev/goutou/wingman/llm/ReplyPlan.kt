@@ -44,6 +44,78 @@ val REPLY_STYLES: List<ReplyStyle> = listOf(
 /** 默认的三种：和三个内置 skill 的提示词原文一致，老用户升级后行为不变。 */
 val DEFAULT_STYLE_IDS: List<String> = listOf("safe", "humor", "advance")
 
+/** 自定义风格的 id 前缀：`custom:名称`。存进偏好的就是这个稳定标识。 */
+const val CUSTOM_STYLE_ID_PREFIX = "custom:"
+
+/**
+ * 最多允许几个自定义风格。
+ *
+ * 给 8 个：风格区是 4 列换行铺开的，8 个正好两行；再多会把设置页撑得很长，
+ * 而且**条数上限是 6**，风格比条数多出一倍以上就没有意义了。
+ */
+const val MAX_CUSTOM_STYLES = 8
+
+/** 自定义风格名允许输入的最大字数（存之前会被 [shortStyleLabel] 再截一次）。 */
+const val MAX_CUSTOM_LABEL_LEN = 16
+
+/** 编码里字段之间的分隔符。用控制字符：用户敲不出来，所以永远不会和内容撞车。 */
+private const val CUSTOM_FIELD_SEP = '\u0001'
+
+/** 编码里每条之间的分隔符。名称里的空白已经在 [shortStyleLabel] 里归一过，不会有换行。 */
+private const val CUSTOM_ENTRY_SEP = '\n'
+
+/**
+ * 用户自己加的一个风格。
+ *
+ * 名字用 [shortStyleLabel] 收拾过（压缩空白 + 截断），**收拾完是空的就返回 null** ——
+ * 让调用方去提示「名字不能为空」，而不是造一个没有名字的风格出来
+ *（那种风格在界面上就是一个空药丸，点也不是、删也不是）。
+ *
+ * [hint] 是给模型看的策略说明，空着也能加，但**不能什么都不写**：
+ * 提示词里每条风格都带一句「这个策略在干什么」，只给一个名字，模型会把它当成标签照抄
+ *（三个候选措辞一模一样，只有 `style` 字段不同）。所以空 hint 会兜一句通用说明。
+ */
+fun customStyle(label: String, hint: String = ""): ReplyStyle? {
+    val name = shortStyleLabel(limitLabel(label))
+    if (name.isEmpty()) return null
+    val cleaned = hint.trim().replace(Regex("\\s+"), " ")
+    return ReplyStyle(
+        id = CUSTOM_STYLE_ID_PREFIX + name,
+        label = name,
+        hint = cleaned.ifBlank { "按「$name」这种语气和策略来写，要和别的候选明显不一样" },
+    )
+}
+
+/** 输入框里先按字数上限收一下，免得用户粘一大段进来。 */
+private fun limitLabel(raw: String): String {
+    val t = raw.trim()
+    return if (t.length <= MAX_CUSTOM_LABEL_LEN) t else t.take(MAX_CUSTOM_LABEL_LEN)
+}
+
+/**
+ * 自定义风格 ↔ 偏好里的字符串（一行一条：`名称\u0001说明`）。
+ *
+ * 为什么不用 `putStringSet`：**Set 会把顺序丢掉**，而风格列表的顺序就是界面上显示的顺序、
+ * 也是「勾不够条数时按顺序补齐」的依据。丢顺序之后用户每次重启看到的顺序都在变。
+ */
+fun encodeCustomStyles(styles: List<ReplyStyle>): String =
+    styles.joinToString(CUSTOM_ENTRY_SEP.toString()) { it.label + CUSTOM_FIELD_SEP + it.hint }
+
+/**
+ * 解回来。任何一条解不出来（空行、只有说明没有名字）就**跳过那一条**，不整体作废 ——
+ * 坏一条就丢光用户的全部自定义风格，代价太大。
+ */
+fun decodeCustomStyles(raw: String): List<ReplyStyle> =
+    raw.split(CUSTOM_ENTRY_SEP)
+        .mapNotNull { line ->
+            val s = line.trim()
+            if (s.isEmpty()) return@mapNotNull null
+            val at = s.indexOf(CUSTOM_FIELD_SEP)
+            if (at < 0) customStyle(s) else customStyle(s.substring(0, at), s.substring(at + 1))
+        }
+        .distinctBy { it.id }
+        .take(MAX_CUSTOM_STYLES)
+
 /**
  * 条数下限 / 上限。
  *
@@ -119,28 +191,57 @@ data class ReplyPlan(
         append("]}")
     }
 
+    /**
+     * 点一下某个风格（界面上的药丸）之后，**实际要存下去**的那组 id。
+     *
+     * 两个刻意的规则：
+     * ① **新点的一定留下** —— 所以「加」的时候排在**最前**，位置不够时让位的是末尾那个。
+     *   以前这里是「加上去就存」，于是存了 4 个而条数只要 3 个；哪 3 个最终生效取决于
+     *   `Set` 的遍历顺序，用户看到的就是「点了个新的，掉的却是别的那个」。
+     * ② **至少留一种**：把最后一个取消掉时保持原样（等于「取消 = 保持现状」），
+     *   否则风格区会变成空选择，而模型侧又会回落默认三样，表现是「点了没反应」。
+     */
+    fun toggledIds(id: String): List<String> {
+        val cur = styles.map { it.id }
+        if (id in cur) {
+            val next = cur - id
+            return if (next.isEmpty()) cur.take(1) else next
+        }
+        return (listOf(id) + cur).take(count)
+    }
+
     companion object {
         /**
          * 从配置算出真正要用的规格。
          *
-         * 三个动作，顺序有讲究：
+         * 四个动作，顺序有讲究：
          * ① 条数夹进 [MIN_REPLIES]..[MAX_REPLIES]；
-         * ② 风格按 [selectedIds] 的顺序认，认不出的丢掉；一个都没认出来就用 [DEFAULT_STYLE_IDS]；
-         * ③ **认出来的风格不够条数时，从完整清单里按固定顺序补齐**；仍然不够就按条数截断。
+         * ② 风格按 [selectedIds] 的顺序认 —— 在**内置 + [customStyles]** 里找，认不出的丢掉；
+         *    一个都没认出来就用 [DEFAULT_STYLE_IDS]；
+         * ③ **认出来的风格不够条数时，从内置清单里按固定顺序补齐**；仍然不够就按条数截断；
+         * ④ 只取前 [count] 个。
          *
-         * ③ 是「选了 1 条风格却想要 3 条」这个场景的关键：用户的意思多半是
+         * ③ 只从**内置**清单补齐，不拿自定义的凑数：自定义是用户一条条手写进来的，
+         * 自动「复制」几条出来填位置，等于替他编了他没写过的风格。
+         *
+         * ③ 本身是「选了 1 条风格却想要 3 条」这个场景的关键：用户的意思多半是
          * 「至少要有『共情』这一条」，而不是「就只要一条、不给别的」。
          * 直接砍成 1 条会让界面上的条数选择**静默失效** —— 那是最容易招来投诉的做法。
          */
-        fun of(count: Int, selectedIds: List<String>): ReplyPlan {
+        fun of(
+            count: Int,
+            selectedIds: List<String>,
+            /** 用户在设置页自己加的风格（见 [customStyle]）。默认空 = 只有内置的 8 种。 */
+            customStyles: List<ReplyStyle> = emptyList(),
+        ): ReplyPlan {
             val n = count.coerceIn(MIN_REPLIES, MAX_REPLIES)
-            val byId = REPLY_STYLES.associateBy { it.id }
+            val byId = (REPLY_STYLES + customStyles).distinctBy { it.id }.associateBy { it.id }
             val picked = LinkedHashSet<ReplyStyle>()
             // 先按用户选的顺序收
             selectedIds.forEach { id -> byId[id]?.let { picked.add(it) } }
             // 一个都没认出来（老配置 / 选了已下线的 id）→ 回默认三样，别给空白卡
             if (picked.isEmpty()) DEFAULT_STYLE_IDS.forEach { id -> byId[id]?.let { picked.add(it) } }
-            // 不够条数就从完整清单补齐（跳过已选的），保证长度真的等于 n
+            // 不够条数就从内置清单补齐（跳过已选的），保证长度真的等于 n
             if (picked.size < n) for (s in REPLY_STYLES) {
                 if (picked.size >= n) break
                 picked.add(s)
@@ -154,7 +255,11 @@ data class ReplyPlan(
 }
 
 /** 按配置算规格的便捷入口（给 [dev.goutou.wingman.config.ConfigData] 用，避免那边 import 整个 llm 包）。 */
-fun replyPlanOf(count: Int, ids: List<String>): ReplyPlan = ReplyPlan.of(count, ids)
+fun replyPlanOf(
+    count: Int,
+    ids: List<String>,
+    customStyles: List<ReplyStyle> = emptyList(),
+): ReplyPlan = ReplyPlan.of(count, ids, customStyles)
 
 /** 短风格名（存进偏好 / 卡片上的标签）。长名字截断，免得把微信里的气泡撑成一整行。 */
 internal fun shortStyleLabel(raw: String): String {

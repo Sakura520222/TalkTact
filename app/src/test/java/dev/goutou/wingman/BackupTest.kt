@@ -4,6 +4,7 @@ import dev.goutou.wingman.config.Backup
 import dev.goutou.wingman.config.ConfigData
 import dev.goutou.wingman.config.Role
 import dev.goutou.wingman.config.Roles
+import dev.goutou.wingman.llm.customStyle
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -102,5 +103,28 @@ class BackupTest {
         val legacy = """{"app":"TalkTact","schema":1,"config":{"replyCount":999}}"""
         val r = Backup.import(legacy, ConfigData(), emptyList())!!
         assertEquals(6, r.config.replyCount)
+    }
+
+    /**
+     * 自定义风格是整个列表里**唯一没法凭内置清单重建**的东西 —— 别的字段丢了都有默认值兜着，
+     * 它丢了就是彻底没了（用户得一条条重敲）。所以往返必须逐字对上，顺序也要对上。
+     */
+    @Test
+    fun `自定义风格能跟着备份往返`() {
+        val styles = listOf(customStyle("撒娇", "带点抱怨")!!, customStyle("冷处理")!!)
+        val cfg = sampleCfg().copy(replyCustomStyles = styles)
+        val r = Backup.import(Backup.export(cfg, sampleRoles(), includeApiKey = true), ConfigData(), emptyList())!!
+        assertEquals(styles, r.config.replyCustomStyles)
+    }
+
+    @Test
+    fun `没有自定义风格时不往备份里塞这个键`() {
+        val text = Backup.export(sampleCfg(), sampleRoles(), includeApiKey = true)
+        assertFalse("默认配置不该多出这个键：$text", text.contains("replyCustomStyles"))
+        // 老备份缺这个键 → 不动当前配置里已有的自定义风格
+        val cur = ConfigData(replyCustomStyles = listOf(customStyle("撒娇", "带点抱怨")!!))
+        val legacy = """{"app":"TalkTact","schema":1,"config":{"ctx":8}}"""
+        val r = Backup.import(legacy, cur, emptyList())!!
+        assertEquals(cur.replyCustomStyles, r.config.replyCustomStyles)
     }
 }

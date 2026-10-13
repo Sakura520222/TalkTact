@@ -207,6 +207,19 @@ class ScreenRenderTest {
         rule.onNodeWithText("每次给几条、什么风格").assertExists()
     }
 
+    /**
+     * 自定义风格的入口。
+     *
+     * 断言的是**输入框的标签和按钮**，不是「有几个药丸」：药丸数量取决于用户加过什么，
+     * 而这一条要钉的是「这个功能在这页上存在、能被操作」。
+     */
+    @Test
+    fun `高级设置里能自己输入添加风格`() {
+        page { AdvancedScreen(store, store.load(), {}, {}, {}, {}) }
+        rule.onNodeWithText("自定义风格（自己输入；加完就直接选中，用法和上面 8 种完全一样）").assertExists()
+        rule.onNodeWithText("添加风格").assertExists()
+    }
+
     @Test
     fun `拉取到的联系人页能渲染 且有搜索框和两段名单`() {
         // 造一份「拉回来的名单」，其中老张已经在白名单里 —— 两段（还没加进去的 / 已经在白名单里的）都要画出来

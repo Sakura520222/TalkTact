@@ -9,6 +9,8 @@ import dev.goutou.wingman.llm.asDouble
 import dev.goutou.wingman.llm.asInt
 import dev.goutou.wingman.llm.asObj
 import dev.goutou.wingman.llm.asStr
+import dev.goutou.wingman.llm.decodeCustomStyles
+import dev.goutou.wingman.llm.encodeCustomStyles
 import dev.goutou.wingman.llm.bool
 import dev.goutou.wingman.llm.num
 import dev.goutou.wingman.llm.str
@@ -49,6 +51,12 @@ object Backup {
         // 只在**非默认**时才写 —— 免得老备份文件一律多出这两个键。
         if (cfg.replyCount != 3) c["replyCount"] = num(cfg.replyCount)
         if (cfg.replyStyleIds.isNotEmpty()) c["replyStyles"] = arr(cfg.replyStyleIds.map { str(it) })
+        // 自定义风格：和偏好里**同一套编码**（一行一条的文本，见 llm/encodeCustomStyles）——
+        // 换成 JSON 数组当然也行，但那样就有两套编码要各维护一遍、还要保证解出来一模一样。
+        // 漏掉这一项的症状很隐蔽：换机导入之后自定义风格全没了，用户会以为是自己没点到保存。
+        if (cfg.replyCustomStyles.isNotEmpty()) {
+            c["replyCustomStyles"] = str(encodeCustomStyles(cfg.replyCustomStyles))
+        }
 
         val fields = LinkedHashMap<String, JsonValue>()
         fields["app"] = str("TalkTact")
@@ -94,6 +102,10 @@ object Backup {
         c["replyCount"].asInt()?.let { cfg = cfg.copy(replyCount = it.coerceIn(1, 6)) }
         c["replyStyles"].asArr()?.let { arr ->
             cfg = cfg.copy(replyStyleIds = arr.mapNotNull { it.asStr() }.filter { it.isNotBlank() }.toSet())
+        }
+        // 老备份没有这个键 → asStr 返回 null → 不动（保持当前配置里已有的自定义风格）
+        c["replyCustomStyles"].asStr()?.let {
+            cfg = cfg.copy(replyCustomStyles = decodeCustomStyles(it))
         }
 
         val imported = root["roles"]?.let { Roles.decode(Json.encode(it)) }.orEmpty()

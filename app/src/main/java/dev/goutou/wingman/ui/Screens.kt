@@ -99,12 +99,15 @@ import dev.goutou.wingman.config.GLASS_QUALITY_HIGH
 import dev.goutou.wingman.config.GLASS_QUALITY_LOW
 import dev.goutou.wingman.config.Role
 import dev.goutou.wingman.config.Roles
+import dev.goutou.wingman.config.replyPlan
 import dev.goutou.wingman.llm.BUILT_IN_SKILLS
-import dev.goutou.wingman.llm.ReplyPlan
+import dev.goutou.wingman.llm.ReplyStyle
 import dev.goutou.wingman.llm.REPLY_STYLES
+import dev.goutou.wingman.llm.MAX_CUSTOM_LABEL_LEN
+import dev.goutou.wingman.llm.MAX_CUSTOM_STYLES
+import dev.goutou.wingman.llm.customStyle
 import dev.goutou.wingman.llm.applyReplyPlan
 import dev.goutou.wingman.llm.coreOf
-import dev.goutou.wingman.llm.replyPlanOf
 import dev.goutou.wingman.llm.Geo
 import dev.goutou.wingman.llm.LlmClient
 import dev.goutou.wingman.llm.LlmException
@@ -756,7 +759,7 @@ fun TrialScreen(store: ConfigStore, glassAlpha: Float) {
                                         msgs = msgs,
                                         roleContext = null,
                                         waitMs = gradedWaitMs(conf.probeReplyMs, conf.probeRiskMs),
-                                        plan = ReplyPlan.of(conf.replyCount, conf.replyStyleIds.toList()),
+                                        plan = conf.replyPlan,
                                     )
                                 }
                                 suggestion = out.suggestion
@@ -1091,7 +1094,10 @@ fun MentorScreen(store: ConfigStore, glassAlpha: Float, onSaved: () -> Unit) {
                                     cur.copy(
                                         prompt = applyReplyPlan(
                                             skill.prompt,
-                                            replyPlanOf(cur.replyCount, cur.replyStyleIds.toList()),
+                                            // 用配置上的 replyPlan：它会带上用户自定义的风格。
+                                            // 这里漏掉那个参数的话，切到内置 skill 时自定义风格会
+                                            // 从提示词快照里消失（下一次调用才又被拼回来，很怪）。
+                                            cur.replyPlan,
                                         ),
                                         skillId = skill.id,
                                         maxTokens = 0,
@@ -1570,6 +1576,24 @@ fun saveReplyPlan(count: Int, styleIds: Set<String>) {
     store.saveReplyPlan(count, styleIds)
     val fresh = store.load()
     d = d.copy(replyCount = fresh.replyCount, replyStyleIds = fresh.replyStyleIds)
+    persisted = fresh
+    onSaved()
+}
+
+/**
+ * 「自定义风格」加/删也**立刻落盘**，顺带把提示词快照重拼（见 `ConfigStore.saveCustomStyles`）。
+ *
+ * 这里多同步一个 [ConfigData.replyStyleIds]：加了风格顺手就把它选上（见下面卡片的说明），
+ * 只回写风格列表的话，界面上「已选中」的那颗药丸会和配置里存的对不上。
+ */
+fun saveCustomStyles(styles: List<ReplyStyle>, styleIds: Set<String>) {
+    store.saveCustomStyles(styles)
+    store.saveReplyPlan(d.replyCount, styleIds)
+    val fresh = store.load()
+    d = d.copy(
+        replyCustomStyles = fresh.replyCustomStyles,
+        replyStyleIds = fresh.replyStyleIds,
+    )
     persisted = fresh
     onSaved()
 }
@@ -2190,7 +2214,7 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
             Text("每次给几条、什么风格", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
             Spacer(Modifier.height(8.dp))
 
-            val plan = ReplyPlan.of(d.replyCount, d.replyStyleIds.toList())
+            val plan = d.replyPlan
             // 归一化后的「真正会用到的风格」—— 下方提示与按钮选中态都以它为准，
             // 而不是用户原始勾选：选了 2 种却要 5 条时会自动补齐，
             // 只显示原始勾选会让人以为那 3 条不存在。
@@ -2227,11 +2251,11 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
                                 st.id in chosenIds,
                                 Modifier.weight(1f),
                             ) {
-                                // 至少留一种：全取消会让「风格」这个选择彻底失去意义，
-                                // 而模型侧又会回落到默认三样 —— 表现就是「点了没反应」。
-                                // 最后一个取消的会自己变回选中（即「取消 = 保持现状」）。
-                                val next = if (st.id in chosenIds) chosenIds - st.id else chosenIds + st.id
-                                saveReplyPlan(d.replyCount, if (next.isEmpty()) setOf(st.id) else next)
+                                // 勾选规则全在 `ReplyPlan.toggledIds` 里（新点的一定留下、
+                                // 位置不够让末尾的、最后一个取消 = 保持现状）。
+                                // 这里**不能**自己算 `chosenIds ± st.id`：那样存下去会是 n+1 个，
+                                // 哪 n 个生效取决于 Set 的遍历顺序 —— 表现就是「点了新的、掉的是别的」。
+                                saveReplyPlan(d.replyCount, plan.toggledIds(st.id).toSet())
                             }
                         }
                         // 一行放不满时用空 Spacer 补齐权重，避免最后几个被拉得特别宽
@@ -2239,6 +2263,97 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
                     }
                 }
             }
+
+            // ── 自定义风格：自己敲一个风格名加进来 ──────────────────────────────────
+            // 加进来的风格和内置 8 种**完全同等**（能勾选、能写进提示词、能参与补齐），
+            // 不是「只给候选贴个标签」—— 所以它必须真的被算进 ReplyPlan，见 llm/ReplyPlan.kt。
+            Spacer(Modifier.height(12.dp))
+            var newStyleName by remember { mutableStateOf("") }
+            var newStyleHint by remember { mutableStateOf("") }
+            var styleNote by remember { mutableStateOf("") }
+
+            Text(
+                "自定义风格（自己输入；加完就直接选中，用法和上面 8 种完全一样）",
+                fontSize = 13.sp,
+                color = palette.sub,
+            )
+            Spacer(Modifier.height(6.dp))
+
+            if (d.replyCustomStyles.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    d.replyCustomStyles.forEach { st ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            GlassPill(st.label, st.id in chosenIds, Modifier.weight(1f)) {
+                                saveReplyPlan(d.replyCount, plan.toggledIds(st.id).toSet())
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            TextButton(
+                                onClick = {
+                                    // 删掉它，连同它的勾选一起清 —— 只从列表里删、把 id 留在
+                                    // 选中集里的话，它会一直占着一个位置（条数就那么几个），
+                                    // 而界面上又找不到它，表现是「条数明明给了 3 条却只出来 2 条」。
+                                    val rest = d.replyCustomStyles.filter { it.id != st.id }
+                                    val next = plan.styles.map { it.id }.filter { it != st.id }
+                                    saveCustomStyles(rest, next.toSet())
+                                },
+                            ) { Text("删除", fontSize = 13.sp, color = palette.bad) }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+
+            OutlinedTextField(
+                colors = glassFieldColors(),
+                shape = RoundedCornerShape(RadiusR2),
+                value = newStyleName,
+                // 先在输入处就按字数上限拦住，免得粘一大段进来把药丸撑破
+                onValueChange = { if (it.length <= MAX_CUSTOM_LABEL_LEN) newStyleName = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("风格名（比如：撒娇 / 冷处理 / 报价）", fontSize = 13.sp) },
+            )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                colors = glassFieldColors(),
+                shape = RoundedCornerShape(RadiusR2),
+                value = newStyleHint,
+                onValueChange = { newStyleHint = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("给模型的说明（可选，比如：用撒娇的语气，带点抱怨）", fontSize = 13.sp) },
+            )
+            Spacer(Modifier.height(6.dp))
+            Button(
+                onClick = {
+                    val st = customStyle(newStyleName, newStyleHint)
+                    styleNote = when {
+                        st == null -> "风格名不能为空"
+                        d.replyCustomStyles.any { it.id == st.id } -> "「${st.label}」已经加过了"
+                        d.replyCustomStyles.size >= MAX_CUSTOM_STYLES -> "最多加 $MAX_CUSTOM_STYLES 个"
+                        else -> {
+                            // 加完**直接选中，并且排在选中集最前**：条数只有 n 个位置，
+                            // 加了不选中、或者被末尾挤掉，用户看到的就是「加了没用」。
+                            val list = d.replyCustomStyles + st
+                            val next = (listOf(st.id) + plan.styles.map { it.id }).distinct()
+                            saveCustomStyles(list, next.take(d.replyCount).toSet())
+                            newStyleName = ""
+                            newStyleHint = ""
+                            "已加「${st.label}」并选中"
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(RadiusR2),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("添加风格") }
+            if (styleNote.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                Text(styleNote, fontSize = 13.sp, color = palette.sub)
+            }
+
             Spacer(Modifier.height(10.dp))
 
             HintText(

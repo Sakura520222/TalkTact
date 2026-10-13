@@ -5,7 +5,11 @@ import android.content.SharedPreferences
 import dev.goutou.wingman.llm.DEFAULT_PROMPT
 import dev.goutou.wingman.llm.MAX_REPLIES
 import dev.goutou.wingman.llm.MIN_REPLIES
+import dev.goutou.wingman.llm.ReplyPlan
+import dev.goutou.wingman.llm.ReplyStyle
 import dev.goutou.wingman.llm.applyReplyPlan
+import dev.goutou.wingman.llm.decodeCustomStyles
+import dev.goutou.wingman.llm.encodeCustomStyles
 import dev.goutou.wingman.llm.replyPlanOf
 
 /**
@@ -91,6 +95,13 @@ object Keys {
     const val REPLY_COUNT = "reply_count"
     /** 要用哪几种回复风格（存 [ReplyStyle.id] 的集合，见 llm/ReplyPlan.kt 的 REPLY_STYLES）。 */
     const val REPLY_STYLES = "reply_styles"
+    /**
+     * 用户自己加的风格。
+     *
+     * 存的是**一行一条的编码文本**（`名称\u0001说明`，见 `llm/encodeCustomStyles`），
+     * 不用 `putStringSet` —— Set 会把顺序丢掉，而顺序就是界面上显示的顺序。
+     */
+    const val REPLY_CUSTOM_STYLES = "reply_custom_styles"
     /** 「接口自检」量到的两路延迟（ms）；设置页的公告栏与「两路对齐等待」都用它 */
     const val PROBE_REPLY_MS = "probe_reply_ms"
     const val PROBE_RISK_MS = "probe_risk_ms"
@@ -235,6 +246,14 @@ data class ConfigData(
      */
     val replyStyleIds: Set<String> = emptySet(),
     /**
+     * 用户**自己加**的回复风格（设置页里手输「名称 + 说明」）。
+     *
+     * 顺序 = 界面上显示的顺序。它们和内置 8 种一样参与「勾选 / 补齐 / 写进提示词」，
+     * 唯一区别是：**补齐条数时只用内置的**，不会拿自定义的来凑数
+     *（见 llm/ReplyPlan.kt 的 [dev.goutou.wingman.llm.ReplyPlan.of]）。
+     */
+    val replyCustomStyles: List<dev.goutou.wingman.llm.ReplyStyle> = emptyList(),
+    /**
      * 「接口自检」量到的两路延迟（毫秒；0 = 没测过）。
      * 和 [selfStyleEnabled] 一样是**只读**字段：由 [ConfigStore.saveProbeMs] 单独写，save() 不碰。
      */
@@ -335,6 +354,8 @@ data class ConfigData(
             replyStyleIds = p.getStringSet(Keys.REPLY_STYLES, emptySet()).orEmpty()
                 .filter { it.isNotBlank() }
                 .toSet(),
+            // 编码文本 → 自定义风格列表。坏行会被 decode 自己跳过，这里不用再兜。
+            replyCustomStyles = decodeCustomStyles(p.getString(Keys.REPLY_CUSTOM_STYLES, null).orEmpty()),
             probeReplyMs = p.getLong(Keys.PROBE_REPLY_MS, 0L).coerceAtLeast(0L),
             probeRiskMs = p.getLong(Keys.PROBE_RISK_MS, 0L).coerceAtLeast(0L),
             proxyEnabled = p.getBoolean(Keys.PROXY_ON, false),
@@ -352,6 +373,17 @@ data class ConfigData(
 
     }
 }
+
+/**
+ * 这份配置对应的回复规格（内置 8 种 + 用户自定义的）。
+ *
+ * 抽成扩展是为了让调用方只写 `cfg.replyPlan` —— 一共三处要用（[ConfigStore.saveReplyPlan]
+ * 重拼提示词、`llm/LlmClient` 决定要几条、`wechat/Overlay` 传给分级那两路），
+ * 每处都自己写一遍 `ReplyPlan.of(replyCount, replyStyleIds.toList(), replyCustomStyles)`
+ * 的话，**漏掉最后那个参数**就是「自定义风格在某个路径上不生效」—— 而这种漏法是静默的。
+ */
+val ConfigData.replyPlan: ReplyPlan
+    get() = replyPlanOf(replyCount, replyStyleIds.toList(), replyCustomStyles)
 
 /**
  * 配置仓库。
@@ -406,6 +438,8 @@ class ConfigStore(context: Context) {
                 Keys.REPLY_STYLES,
                 d.replyStyleIds.map { it.trim() }.filter { it.isNotBlank() }.toHashSet(),
             )
+            // 自定义风格连同顺序一起存（编码成一行一条），见 Keys.REPLY_CUSTOM_STYLES 的说明
+            .putString(Keys.REPLY_CUSTOM_STYLES, encodeCustomStyles(d.replyCustomStyles))
             .putBoolean(Keys.PROXY_ON, d.proxyEnabled)
             .putInt(Keys.PROXY_PORT, d.proxyPort.coerceIn(1024, 65535))
             .putBoolean(Keys.WHITELIST_ON, d.whitelistEnabled)
@@ -546,11 +580,46 @@ class ConfigStore(context: Context) {
         val n = count.coerceIn(MIN_REPLIES, MAX_REPLIES)
         val rebuilt = applyReplyPlan(
             sp.getString(Keys.PROMPT, null).orEmpty().ifBlank { DEFAULT_PROMPT },
-            replyPlanOf(n, ids.toList()),
+            // 自定义风格必须一起带上：不带的话 `custom:xxx` 这种 id 在内置清单里认不出来会被丢掉，
+            // 用户明明选着自定义风格，重拼出来的提示词里却没有它 ——「加了没用」的老剧本。
+            replyPlanOf(n, ids.toList(), customStyles()),
         )
         sp.edit()
             .putInt(Keys.REPLY_COUNT, n)
             .putStringSet(Keys.REPLY_STYLES, ids)
+            .putString(Keys.PROMPT, rebuilt)
+            .apply()
+    }
+
+    /**
+     * 当前存着的自定义风格。
+     *
+     * 单独抽出来是因为它有两个用途：① 设置页显示；② [saveReplyPlan] / [saveCustomStyles]
+     * 重拼提示词时要把 id 认出来。两处都从偏好读，免得内存里那份和落盘的那份不一致。
+     */
+    fun customStyles(): List<ReplyStyle> =
+        decodeCustomStyles(sp.getString(Keys.REPLY_CUSTOM_STYLES, null).orEmpty())
+
+    /**
+     * 加 / 删一个自定义风格，**顺手把提示词重拼一遍**，立刻落盘。
+     *
+     * 为什么要一起重拼：[Keys.PROMPT] 存的是快照，「提示词」页直接显示它。
+     * 只写风格列表不重拼的话，新加的风格在**实际调用**时会被算进去（调用时会按当前规格再拼一次），
+     * 但页面上那份文本里没有 —— 又是一处「设置是新的、给人看的文本是旧的」。
+     * 这个坑上一版刚踩过（改了条数提示词不跟着变），不重复踩。
+     */
+    fun saveCustomStyles(styles: List<ReplyStyle>) {
+        val keep = styles.distinctBy { it.id }
+        val rebuilt = applyReplyPlan(
+            sp.getString(Keys.PROMPT, null).orEmpty().ifBlank { DEFAULT_PROMPT },
+            replyPlanOf(
+                sp.getInt(Keys.REPLY_COUNT, 3).coerceIn(MIN_REPLIES, MAX_REPLIES),
+                sp.getStringSet(Keys.REPLY_STYLES, emptySet()).orEmpty().toList(),
+                keep,
+            ),
+        )
+        sp.edit()
+            .putString(Keys.REPLY_CUSTOM_STYLES, encodeCustomStyles(keep))
             .putString(Keys.PROMPT, rebuilt)
             .apply()
     }

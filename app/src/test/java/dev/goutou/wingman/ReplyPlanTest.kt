@@ -11,6 +11,9 @@ import dev.goutou.wingman.llm.FULL_PROMPT
 import dev.goutou.wingman.llm.applyReplyPlan
 import dev.goutou.wingman.llm.buildSkillPrompt
 import dev.goutou.wingman.llm.coreOf
+import dev.goutou.wingman.llm.customStyle
+import dev.goutou.wingman.llm.decodeCustomStyles
+import dev.goutou.wingman.llm.encodeCustomStyles
 import dev.goutou.wingman.llm.gradedReplyPrompt
 import dev.goutou.wingman.llm.gradedRiskPrompt
 import dev.goutou.wingman.llm.outputContract
@@ -291,5 +294,109 @@ class ReplyPlanTest {
         assertTrue("示例段落必须还在", noHead.contains("【例子】"))
         assertTrue("示例里的 intent 字段必须还在", noHead.contains("想约你见面"))
         assertTrue("契约确实被摘掉了", !noHead.contains("下标（从 0 开始）；why"))
+    }
+
+    // ── 自定义风格（用户在设置页自己输入的那种） ────────────────────────────────
+
+    /**
+     * 自定义风格不是「给候选贴个标签」，它必须走完整条链路：
+     * 认得出 id → 进得了规格段 → JSON 示例里的 style 也跟着换。
+     * 少任何一环，用户看到的就是「加了但模型不按它写」。
+     */
+    @Test
+    fun `自定义风格能被选中，并且真的写进提示词`() {
+        val st = customStyle("撒娇", "用撒娇的语气，带点抱怨")!!
+        val plan = ReplyPlan.of(1, listOf(st.id), listOf(st))
+        assertEquals(listOf("撒娇"), plan.labels)
+
+        val p = applyReplyPlan(DEFAULT_PROMPT, plan)
+        assertTrue("规格段要写上自定义风格的名字：$p", p.contains("撒娇"))
+        assertTrue("用户写的说明也要进提示词：$p", p.contains("用撒娇的语气"))
+        assertTrue("JSON 示例里的 style 也要换成它（模型照抄示例）：$p", p.contains("\"style\":\"撒娇\""))
+    }
+
+    @Test
+    fun `只写了名字的自定义风格会兜一句说明`() {
+        val st = customStyle("冷处理")!!
+        assertTrue("必须带一句策略说明，只给名字模型会把它当标签照抄：${st.hint}", st.hint.contains("冷处理"))
+    }
+
+    @Test
+    fun `空名字加不进来（返回 null 让界面去提示）`() {
+        assertEquals(null, customStyle("   "))
+        assertEquals(null, customStyle(""))
+    }
+
+    @Test
+    fun `过长的名字会被截断，不会把卡片撑破`() {
+        val st = customStyle("一二三四五六七八九十十一十二十三")!!
+        assertTrue("超过 8 个字要截掉：${st.label}", st.label.length <= 9)
+    }
+
+    @Test
+    fun `自定义风格的编解码能原样往返，顺序不丢`() {
+        val list = listOf(customStyle("撒娇", "带点抱怨")!!, customStyle("冷处理")!!)
+        assertEquals(list, decodeCustomStyles(encodeCustomStyles(list)))
+    }
+
+    /**
+     * 坏一条只丢那一条。整体作废等于「存坏一个字符，用户全部自定义风格没了」——
+     * 而这个编码是拼在一行里的，这种事故一点都不罕见。
+     */
+    @Test
+    fun `编码里出现空行或残行时只跳过那一条`() {
+        val raw = encodeCustomStyles(listOf(customStyle("撒娇", "带点抱怨")!!)) + "\n\n" + "\u0001只有说明没有名字\n"
+        val back = decodeCustomStyles(raw)
+        assertEquals(1, back.size)
+        assertEquals("撒娇", back[0].label)
+    }
+
+    @Test
+    fun `补齐条数只从内置清单补，不拿自定义的凑数`() {
+        val st = customStyle("撒娇", "带点抱怨")!!
+        val plan = ReplyPlan.of(3, listOf(st.id), listOf(st))
+        assertEquals(listOf("撒娇", "稳妥", "幽默"), plan.labels)
+    }
+
+    @Test
+    fun `删掉的自定义风格会被忽略，不会在规格里留个空位`() {
+        val st = customStyle("撒娇", "带点抱怨")!!
+        // 风格列表里已经没有它了（用户删了），但选中集里还残着它的 id
+        val plan = ReplyPlan.of(3, listOf(st.id, "safe", "humor"), emptyList())
+        assertEquals(listOf("稳妥", "幽默", "推进"), plan.labels)
+    }
+
+    @Test
+    fun `加完自定义风格它一定在选中集里，不会被末尾挤掉`() {
+        val st = customStyle("撒娇", "带点抱怨")!!
+        val plan = ReplyPlan.default()
+        // 界面上「加完直接选中」时就是这么算的：新加的排最前，再按条数截断
+        val next = (listOf(st.id) + plan.styles.map { it.id }).distinct().take(plan.count)
+        val after = ReplyPlan.of(plan.count, next, listOf(st))
+        assertTrue("新加的必须在生效列表里：${after.labels}", after.labels.contains("撒娇"))
+        assertEquals("总数仍然等于条数", plan.count, after.styles.size)
+    }
+
+    /**
+     * 点药丸的规则。以前是「自己算 chosenIds ± id 然后整个存下去」，
+     * 于是存了 4 个而条数只要 3 个 —— 哪 3 个生效取决于 Set 的遍历顺序，
+     * 用户看到的就是「点了个新的，掉的却是别的那个」。
+     */
+    @Test
+    fun `toggledIds：新点的一定留下，位置不够让末尾的`() {
+        val plan = ReplyPlan.of(3, listOf("safe", "humor", "advance"))
+        assertEquals(listOf("empathy", "safe", "humor"), plan.toggledIds("empathy"))
+    }
+
+    @Test
+    fun `toggledIds：取消一个已选的只是少一个`() {
+        val plan = ReplyPlan.of(3, listOf("safe", "humor", "advance"))
+        assertEquals(listOf("safe", "advance"), plan.toggledIds("humor"))
+    }
+
+    @Test
+    fun `toggledIds：取消到最后一个时保持原样`() {
+        val plan = ReplyPlan.of(1, listOf("safe"))
+        assertEquals(listOf("safe"), plan.toggledIds("safe"))
     }
 }

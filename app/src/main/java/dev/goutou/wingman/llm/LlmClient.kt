@@ -1,6 +1,7 @@
 package dev.goutou.wingman.llm
 
 import dev.goutou.wingman.config.ConfigData
+import dev.goutou.wingman.config.replyPlan
 import dev.goutou.wingman.proxy.ProxyProtocol
 import dev.goutou.wingman.wechat.ChatMsg
 import java.io.IOException
@@ -55,8 +56,11 @@ class LlmClient(
      *
      * 在这里算一次，不到处现算 —— 好处是**同一轮调用里规格是稳定的**：
      * 分级模式两路并行时算两次也不会算出两个不一样的结果。
+     *
+     * 用配置上的 `replyPlan` 扩展而不是自己 `ReplyPlan.of(...)`：那条路径把
+     * **用户自定义的风格**也一起认了（见 config/Config.kt）。
      */
-    private val plan: ReplyPlan get() = ReplyPlan.of(cfg.replyCount, cfg.replyStyleIds.toList())
+    private val plan: ReplyPlan get() = cfg.replyPlan
 
     /**
      * 出站地址。
