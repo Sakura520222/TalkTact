@@ -52,9 +52,8 @@ class ProxyServer(private val context: Context) {
         val s = ServerSocket(port, 16, InetAddress.getByName("127.0.0.1"))
         socket = s
         running = true
-        ProxyState.running = true
-        ProxyState.port = port
-        ProxyState.lastError = null
+        // 时间戳一并重置：设置页靠它们分辨「一直好好跑着」和「刚被系统杀掉又被拉起来」
+        ProxyState.markStarted(port)
         acceptThread = Thread {
             while (running) {
                 val client = try {
@@ -71,7 +70,7 @@ class ProxyServer(private val context: Context) {
 
     fun stop() {
         running = false
-        ProxyState.running = false
+        ProxyState.markStopped()
         runCatching { socket?.close() }
         socket = null
         runCatching { acceptThread?.interrupt() }
@@ -81,6 +80,9 @@ class ProxyServer(private val context: Context) {
     // ---------------- 单个连接 ----------------
 
     private fun handle(client: Socket) {
+        // 有人真的敲到这个端口了 —— 这一格和 startedAt 放一起，就能回答
+        //「服务一直没被请求过」还是「服务刚起来、之前那次死了」这两个完全不同的问题
+        ProxyState.lastRequestAt = System.currentTimeMillis()
         try {
             client.soTimeout = 70_000
             val input = BufferedInputStream(client.getInputStream())
@@ -198,6 +200,10 @@ class ProxyServer(private val context: Context) {
             conn.setRequestProperty("Content-Type", contentType ?: "application/json; charset=utf-8")
             conn.setRequestProperty("Accept", "application/json")
             conn.setRequestProperty("Authorization", "Bearer $apiKey")
+            // 长度写死：body 可能很大（直传图片那条路会到几百 KB），
+            // 不写死的话 HttpURLConnection 会改用 chunked，而这里的 body 是我们已经读全的字节数组，
+            // 本来就不需要分块 —— 写死同时也省掉一次内存拷贝。
+            conn.setFixedLengthStreamingMode(body.size)
             conn.outputStream.use { it.write(body) }
 
             val code = conn.responseCode

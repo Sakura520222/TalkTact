@@ -11,20 +11,51 @@ data class ImageCandidateSpec(
     val isAvatarLike: Boolean,
     val isSquareSmall: Boolean,
     val isBig: Boolean,
+    /**
+     * true = 这个控件**没有可直接拿的位图**，只能靠 `view.draw()` 画出来。
+     *
+     * 为什么让它参与挑选（issue #7②）：真机上「图上有字却认不出字」排查下来，
+     * 命中的往往正是这种自绘控件 —— `view.draw()` 对用了硬件层 / SurfaceView 的控件
+     * 会画出一整张同色位图，然后就得到一句「这张图里没字」。同一档里只要还有一个
+     * 真位图候选（ImageView + BitmapDrawable），就该优先拿它。
+     */
+    val viaDraw: Boolean = false,
 )
 
-/** Selects the image candidate without depending on View, Bitmap, or Canvas. */
-fun selectImageCandidate(candidates: List<ImageCandidateSpec>, rowIndex: Int = -1): Int {
-    val bigLeaf = candidates.indices.filter { candidates[it].isBig && candidates[it].isLeaf }
-    bigLeaf.maxByOrNull { candidates[it].width * candidates[it].height }?.let { return it }
+/**
+ * Selects the image candidate without depending on View, Bitmap, or Canvas.
+ *
+ * @param allowSquareSmall 允许方形小图当候选。默认 false（头像 / 表情包本来就不该拿去认字），
+ *   只有「表情包直传给多模态模型」那条路才开 —— 那时候图**本身就是内容**，
+ *   而表情包恰恰长得又方又小（见 wechat/Overlay 里的 wantStickerImage）。
+ */
+fun selectImageCandidate(
+    candidates: List<ImageCandidateSpec>,
+    rowIndex: Int = -1,
+    allowSquareSmall: Boolean = false,
+): Int {
+    // 同一档里**真位图优先于自绘**：自绘那条路可能画出一整张同色（见 [ImageCandidateSpec.viaDraw]）。
+    // 只剩自绘候选时也不放弃 —— 画得出内容的控件比「这一行没有图」强。
+    fun pick(indices: List<Int>): Int? {
+        if (indices.isEmpty()) return null
+        val real = indices.filter { !candidates[it].viaDraw }
+        return (real.ifEmpty { indices }).maxByOrNull { candidates[it].width * candidates[it].height }
+    }
 
+    pick(candidates.indices.filter { candidates[it].isBig && candidates[it].isLeaf })?.let { return it }
+
+    // 「大容器」这一档刻意**不**按 viaDraw 排序：它选的是「装图的那个框」而不是图本身，
+    // 尺寸与深度才是这一档的判据，掺进取像素的方式只会让结果变得难解释。
     val bigContainer = candidates.indices.filter { candidates[it].isBig && it != rowIndex }
     bigContainer.maxWithOrNull(compareBy<Int> { candidates[it].depth * 10_000_000 + candidates[it].width * candidates[it].height })
         ?.let { return it }
 
-    return candidates.indices
-        .filter { candidates[it].isLeaf && !candidates[it].isAvatarLike && !candidates[it].isSquareSmall }
-        .maxByOrNull { candidates[it].width * candidates[it].height } ?: -1
+    return pick(
+        candidates.indices.filter {
+            candidates[it].isLeaf && !candidates[it].isAvatarLike &&
+                (allowSquareSmall || !candidates[it].isSquareSmall)
+        },
+    ) ?: -1
 }
 
 /** Measurements of a title node; visibility and ancestry stay at the Android boundary. */

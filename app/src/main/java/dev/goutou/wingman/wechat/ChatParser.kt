@@ -1,5 +1,7 @@
 package dev.goutou.wingman.wechat
 
+import dev.goutou.wingman.config.IMAGE_MODE_OCR
+
 /**
  * 快照 -> 聊天记录。纯函数，不碰 Android API，可直接单测。
  *
@@ -16,7 +18,17 @@ class ChatParser(
      *   注入侧传的是「走本地代理去 App 认字」，单测传的是现成的字符串。
      *   **它抛异常也不会影响解析**：这一行走兜底（回落成 [ATTACHMENT_TEXT]）。
      */
-    fun parse(rows: List<RowSnapshot>, imageText: (RowImage) -> String? = { null }): List<ChatMsg> {
+    fun parse(
+        rows: List<RowSnapshot>,
+        /** 图片交给模型的方式，见 config/Config.kt 的 IMAGE_MODE_*。 */
+        imageMode: String = IMAGE_MODE_OCR,
+        /**
+         * 这一行的图**本体**（JPEG 字节）—— 只在真的要直传时才问（issue #7③）。
+         * 默认 null = 老行为（只拿文字、不带图）。
+         */
+        imageBytes: (RowImage) -> ByteArray? = { null },
+        imageText: (RowImage) -> String? = { null },
+    ): List<ChatMsg> {
         val out = ArrayList<ChatMsg>(rows.size)
         for (row in rows) {
             val bubble = row.bubble ?: continue
@@ -28,14 +40,26 @@ class ChatParser(
             val raw = bubble.text
             // 附件行 = 「一个字都没有」或者微信给的通用占位（[图片] 这种，无障碍描述里也会有）。
             // 问一句「这张图认出来什么字」——认字本身在 App 进程里做，这里可能什么都拿不到。
-            if (raw == null || isGenericAttachment(raw)) {
+            if (raw == null || isGenericAttachment(raw) || isStickerAttachment(raw)) {
                 val ocr = row.image?.let { runCatching { imageText(it) }.getOrNull() }
+                // 图本体只在「这一条值得直传」时才取：取一次就有一次画图 + 编码的成本，
+                // 配置说只认字的时候一个字节都不该多拿（issue #7③）
+                val jpeg = row.image
+                    ?.takeIf { shouldSendImage(imageMode, ocr) }
+                    ?.let { runCatching { imageBytes(it) }.getOrNull() }
                 // 认出字了就换成它；没认出来时，原文本来就是 [图片] 这种占位的就照旧用原文
                 // （不能把 [图片] 换成我们更笼统的占位 —— 那是信息倒退）
                 if (raw == null || !ocr.isNullOrBlank()) {
                     val text = imageMessageText(ocr, maxTextLen)
                     // 认到字的当**真消息**（进上下文、也进角色记录）；没认到的仍是「内容未知」的占位
-                    add(out, ChatMsg(fromMe, text, who, attachment = text == ATTACHMENT_TEXT))
+                    add(out, ChatMsg(fromMe, text, who, attachment = text == ATTACHMENT_TEXT), jpeg)
+                    continue
+                }
+                // 表情包 / 语音这类「一个字都没认出来」的占位：如果图本体取到了，**也要把这一条发出去**。
+                // 不然「直传图片」在上下文里连个位置都没有 —— 表情包永远只是占位就是这个原因
+                //（issue #7③ 的原话：表情包始终是占位符，没有任何内容传给模型）。
+                if (jpeg != null) {
+                    add(out, ChatMsg(fromMe, raw ?: ATTACHMENT_TEXT, who, attachment = true), jpeg)
                     continue
                 }
             }
@@ -49,9 +73,10 @@ class ChatParser(
     }
 
     /** 相邻重复（合并转发、刷屏的相同回复）只留一条，省 token。 */
-    private fun add(out: MutableList<ChatMsg>, msg: ChatMsg) {
+    private fun add(out: MutableList<ChatMsg>, msg: ChatMsg, image: ByteArray? = null) {
         val last = out.lastOrNull()
         if (last != null && last.fromMe == msg.fromMe && last.text == msg.text && last.who == msg.who) return
+        msg.image = image
         out.add(msg)
     }
 

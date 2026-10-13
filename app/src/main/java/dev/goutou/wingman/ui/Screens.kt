@@ -93,6 +93,9 @@ import dev.goutou.wingman.config.DiagExport
 import androidx.core.content.ContextCompat
 import dev.goutou.wingman.proxy.ProxyProtocol
 import dev.goutou.wingman.proxy.ProxyState
+import dev.goutou.wingman.config.IMAGE_MODE_OCR
+import dev.goutou.wingman.config.IMAGE_MODE_OCR_THEN_VISION
+import dev.goutou.wingman.config.IMAGE_MODE_VISION
 import dev.goutou.wingman.proxy.ProxyService
 import dev.goutou.wingman.config.GLASS_QUALITY_AUTO
 import dev.goutou.wingman.config.GLASS_QUALITY_HIGH
@@ -1440,6 +1443,43 @@ private fun SourceChip(skillId: String) {
  * 它们的共同点是「配一次就不常动」，所以单独一层；诊断再往里一层（三级）。
  * 「会话白名单」卡里的候选人名单同理 —— 拉回来的联系人放 [ChatCandidatesScreen]（也是三级）。
  */
+/**
+ * 「多久以前」的一句话 —— 设置页那行代理保活诊断用它（issue #7①）。
+ *
+ * 只有四档（秒 / 分钟 / 小时 / 天）：这里要回答的是「服务是刚起来的、还是一直活着」，
+ * 精确到秒没有意义，而「刚刚 / 2 分钟前 / 1 小时前」一眼就能读。
+ * [at] 为 0 或负数表示「从来没有过」。[now] 可传是为了让它保持纯函数、能直接单测。
+ */
+internal fun agoText(at: Long, now: Long = System.currentTimeMillis()): String {
+    if (at <= 0L) return "从来没有过"
+    val sec = ((now - at) / 1000L).coerceAtLeast(0L)
+    return when {
+        sec < 5 -> "刚刚"
+        sec < 60 -> "${sec} 秒前"
+        sec < 3600 -> "${sec / 60} 分钟前"
+        sec < 86_400 -> "${sec / 3600} 小时前"
+        else -> "${sec / 86_400} 天前"
+    }
+}
+
+/**
+ * 跳到「把本应用加入电池优化白名单」。
+ *
+ * 为什么必须由用户点一下（issue #7①）：国产 ROM 的后台冻结只认系统的白名单，
+ * 代码怎么写都绕不过去 —— 这也是「App 一退到后台代理就没了」最后一公里的唯一解法。
+ * 先试**直接请求**那条（一次点击搞定）；有些系统不认、或没装那个 Activity，
+ * 就退回打开那个列表页让用户自己找。
+ */
+internal fun openBatteryWhitelist(context: android.content.Context) {
+    val direct = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+        .setData(android.net.Uri.parse("package:${context.packageName}"))
+        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    val list = android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(direct) }
+        .recoverCatching { context.startActivity(list) }
+}
+
 @Composable
 fun AdvancedScreen(
     store: ConfigStore,
@@ -1551,6 +1591,18 @@ fun AdvancedScreen(
         store.saveOcr(on)
         val fresh = store.load()
         d = d.copy(ocrEnabled = fresh.ocrEnabled)
+        persisted = fresh
+        onSaved()
+    }
+
+    /**
+     * 「图片怎么交给模型」也**立刻落盘** —— 它和识别开关是同一件事的两半，
+     * 改完就要去微信里试，不该还要记得回来点一次保存。
+     */
+    fun saveImageMode(mode: String) {
+        store.saveImageMode(mode)
+        val fresh = store.load()
+        d = d.copy(imageMode = fresh.imageMode)
         persisted = fresh
         onSaved()
     }
@@ -2000,6 +2052,34 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
                     fontSize = 13.sp,
                     color = if (ProxyState.running) palette.ok else palette.bad,
                 )
+                // 活体诊断（issue #7①）：光说「服务在跑」不够 —— 得能分辨「一直好好跑着」
+                // 和「刚被系统杀掉又被拉起来」。这两件事的处置方式完全不同：
+                // 前者什么都不用做，后者要去加电池白名单。
+                if (ProxyState.running) {
+                    Text(
+                        buildString {
+                            append("● 前台服务：")
+                            append(
+                                if (ProxyState.foreground) "已挂上（系统不会轻易回收）"
+                                else "没挂上 —— 系统随时可能连进程一起回收，点下面那个按钮",
+                            )
+                            append("\n● 已运行 ").append(agoText(ProxyState.startedAt))
+                            append("　最近被请求：").append(
+                                if (ProxyState.lastRequestAt <= 0L) "还没有过（微信侧还没走代理）"
+                                else agoText(ProxyState.lastRequestAt),
+                            )
+                            if (ProxyState.restarts > 0) {
+                                append("\n● 被系统重启过 ").append(ProxyState.restarts).append(" 次（进程被杀过）")
+                            }
+                        },
+                        fontSize = 13.sp,
+                        color = if (ProxyState.foreground) palette.sub else palette.warn,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(onClick = { openBatteryWhitelist(context) }) {
+                        Text("加电池优化白名单")
+                    }
+                }
                 val (lastRoute, lastRouteAt) = store.lastRoute()
                 if (lastRoute.isNotBlank() && lastRouteAt > 0L) {
                     val ok = lastRoute == ProxyProtocol.ROUTE_PROXY
@@ -2076,7 +2156,9 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
                 Text(
                     "⚠ 微信进程对 http 明文的策略不归我们管：如果开了之后微信里识别一直失败，" +
                         "把这里关掉就退回直连（注入侧给的报错里也会这么提示）。\n" +
-                        "重启手机后代理不会自己回来，打开一次 App 就会自动恢复。",
+                        "重启手机 / 覆盖安装之后代理会自己回来（不必再开一次 App）；" +
+                        "微信侧连不上时它还会把 App 叫醒一次 —— 这两件事有没有真的发生，" +
+                        "看上面那行的「已运行」和「最近被请求」。",
                     fontSize = 13.sp,
                     color = palette.warn,
                 )
@@ -2427,6 +2509,43 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
                         "否则微信那边连不上本机端口，会直接跳过（图片仍是占位）。",
                     fontSize = 13.sp,
                     color = palette.warn,
+                )
+            }
+            if (d.ocrEnabled) {
+                Spacer(Modifier.height(10.dp))
+                Text("图片怎么交给模型", fontSize = 15.sp, color = palette.text)
+                Text(
+                    "「只认字」是默认：图片只在本机认成文字，不进任何请求，图不出手机。\n" +
+                        "后两档会把**图片本体**一起发给你配置的那个接口 —— 换来的是「字认不出来 / " +
+                        "表情包」这类内容也能被看懂。发出去的图是压缩过的 JPEG（最长边 1280）。",
+                    fontSize = 13.sp,
+                    color = palette.sub,
+                )
+                Spacer(Modifier.height(6.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    GlassPill("只认字", d.imageMode == IMAGE_MODE_OCR, Modifier.weight(1f)) {
+                        saveImageMode(IMAGE_MODE_OCR)
+                    }
+                    GlassPill("认不出才发图", d.imageMode == IMAGE_MODE_OCR_THEN_VISION, Modifier.weight(1f)) {
+                        saveImageMode(IMAGE_MODE_OCR_THEN_VISION)
+                    }
+                    GlassPill("总是发图", d.imageMode == IMAGE_MODE_VISION, Modifier.weight(1f)) {
+                        saveImageMode(IMAGE_MODE_VISION)
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    when (d.imageMode) {
+                        IMAGE_MODE_VISION ->
+                            "总是发图：每条带图的聊天都会把图发给接口（连表情包一起）。看图最准，也最费。"
+                        IMAGE_MODE_OCR_THEN_VISION ->
+                            "认不出才发图：只有在「一个字都没认出来」或「认出来的字少于 12 个」时才把图发出去 —— " +
+                                "正是截图认不出、表情包没内容这两种情况。"
+                        else ->
+                            "只认字：图片不出手机。代价是字太小的缩略图认不出来，表情包也始终是个占位。"
+                    },
+                    fontSize = 13.sp,
+                    color = if (d.imageMode == IMAGE_MODE_OCR) palette.sub else palette.warn,
                 )
             }
             Spacer(Modifier.height(8.dp))

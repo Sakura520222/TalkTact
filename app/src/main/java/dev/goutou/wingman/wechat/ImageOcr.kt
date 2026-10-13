@@ -35,7 +35,13 @@ import java.util.concurrent.Executors
  *    卡片会永远卡在「正在认图…」；
  * 5. **任何异常都不往上抛** —— 一次识图失败绝不能让整轮分析挂掉。
  */
-internal class ImageOcr {
+internal class ImageOcr(
+    /**
+     * 回环连不上时叫一声（issue #7①）。由 Overlay 传进来 —— 它手上有微信的 Context，
+     * 而这一层刻意不碰 Context：它跑在后台线程上，也不该自己决定去拉起谁。
+     */
+    private val onProxyUnreachable: (() -> Unit)? = null,
+) {
 
     private val pool = Executors.newSingleThreadExecutor { r ->
         Thread(r, "talktact-ocr").also { it.isDaemon = true }
@@ -116,7 +122,9 @@ internal class ImageOcr {
 
             val bytes = img.jpeg(ProxyProtocol.OCR_MAX_SIDE)
             if (bytes == null || bytes.isEmpty()) {
-                line = "跳过：这一行的图取不到字节（不是普通位图 / 已回收）"
+                // 原因由 RowImage 带出来（自绘控件画成空白 / 不是普通位图 / 编码失败）——
+                // 「取不到图」和「取到了没字」是两件事，别又混成一句（issue #7②）
+                line = "跳过：这一行的图取不到（${img.fail ?: "原因未知"}）"
                 continue
             }
             if (bytes.size > ProxyProtocol.OCR_MAX_BYTES) {
@@ -196,8 +204,30 @@ internal class ImageOcr {
         }
     }
 
-    /** 真正那一跳：带 token 把 JPEG 丢给 App 的回环端口，响应体就是文字。 */
-    private fun post(bytes: ByteArray, cfg: ConfigData): String {
+    /**
+     * 真正那一跳：带 token 把 JPEG 丢给 App 的回环端口，响应体就是文字。
+     *
+     * 连不上时**叫一次 App、再重试一次**（issue #7①）：App 的进程可能已经被系统回收了，
+     * 端口跟着没了 —— 而它有可能正是被这条唤醒广播拉起来的（见 [ProxyWake]）。
+     * 只重试一次，而且只在「连不上」这类错误上重试：别的错重试也没用，
+     * 只会让卡片在「正在认图…」上多停一秒。
+     */
+    private fun post(bytes: ByteArray, cfg: ConfigData): String = try {
+        postOnce(bytes, cfg)
+    } catch (t: Throwable) {
+        if (!isConnectFailure(t)) throw t
+        onProxyUnreachable?.invoke()
+        // 等一小会儿：App 进程被广播拉起来要时间，太短了第二次照样连不上
+        runCatching { Thread.sleep(900) }
+        postOnce(bytes, cfg)
+    }
+
+    /** 连不上（而不是「对面回了个错」）——只有这一类才值得「叫一下 App 再试一次」。 */
+    private fun isConnectFailure(t: Throwable): Boolean =
+        t is java.net.SocketException || t is java.net.SocketTimeoutException ||
+            t is java.net.NoRouteToHostException
+
+    private fun postOnce(bytes: ByteArray, cfg: ConfigData): String {
         val conn = URL(ProxyProtocol.ocrUrl(cfg.proxyPort)).openConnection() as HttpURLConnection
         return try {
             conn.requestMethod = "POST"

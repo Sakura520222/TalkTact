@@ -2,7 +2,7 @@
 
 在微信聊天页右上角留一个**小按钮**，点开才是候选回复卡片：读最近几条消息 → 调 LLM → 给 3 条风格不同的候选回复 → **点一下填入输入框**（不会自动发送）。默认收起、不挡消息。
 
-当前版本 **v0.8.11**（模块库正式版；0.8.12 正在测试中）。对 v0.1 的重写说明见 [IMPROVEMENTS.md](IMPROVEMENTS.md)，历次改动见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **v0.8.12**（模块库正式版；0.8.13 正在测试中）。对 v0.1 的重写说明见 [IMPROVEMENTS.md](IMPROVEMENTS.md)，历次改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 > English: [README.en.md](README.en.md)
 

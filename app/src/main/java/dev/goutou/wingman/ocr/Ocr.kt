@@ -1,5 +1,6 @@
 package dev.goutou.wingman.ocr
 
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -68,8 +69,12 @@ object Ocr {
         // ⚠️ ML Kit 的 InputImage **不吃 JPEG 字节**（它只认 Bitmap / NV21 / YV12 / YUV_420_888，
         // 压根没有 IMAGE_FORMAT_JPEG 这个常量）—— 所以先自己解成位图再喂进去。
         // 进来的图已经被微信侧压到最长边 1280，解出来大约 10MB 上下，认完就回收。
-        val bitmap = BitmapFactory.decodeByteArray(image, 0, image.size)
+        val decoded = BitmapFactory.decodeByteArray(image, 0, image.size)
             ?: throw IllegalStateException("这张图解不开（不是有效图片？）")
+        // 太小的图**放大**再认（issue #7②）：微信列表里那张图可能只是缩略图，
+        // 小字在两三百像素宽的位图上根本不成形 —— 而 OCR_MAX_SIDE 只缩不放，
+        // 于是「对方发来的含字截图」会稳定地回一句「这张图里没字」。
+        val bitmap = upscaleIfSmall(decoded)
 
         val input = InputImage.fromBitmap(bitmap, 0)
         val latch = CountDownLatch(1)
@@ -94,6 +99,37 @@ object Ocr {
         failure?.let { throw IllegalStateException("识别失败：${it.message}", it) }
         return text.orEmpty()
     }
+
+    /**
+     * 长边小于 [UPSCALE_BELOW] 的图先放大再认。
+     *
+     * 放大不会凭空造出信息，但它让笔画重新跨过识别器需要的那几个像素 ——
+     * 对「微信列表里那张缩略图」这种尺寸（两三百像素）帮助很明显。
+     * 上限 [UPSCALE_MAX_LONGEST] 是防止把一张中等的图放大到几百兆内存。
+     */
+    private fun upscaleIfSmall(src: Bitmap): Bitmap {
+        val longest = maxOf(src.width, src.height)
+        if (longest <= 0 || longest >= UPSCALE_BELOW) return src
+        val k = (UPSCALE_MAX_LONGEST.toFloat() / longest).coerceAtMost(2f)
+        if (k <= 1.05f) return src
+        val out = runCatching {
+            Bitmap.createScaledBitmap(
+                src,
+                (src.width * k).toInt().coerceAtLeast(1),
+                (src.height * k).toInt().coerceAtLeast(1),
+                true,
+            )
+        }.getOrNull() ?: return src
+        // 只回收「被换掉的那一份」：createScaledBitmap 尺寸相同时会把原图原样还回来
+        if (out !== src) runCatching { src.recycle() }
+        return out
+    }
+
+    /** 长边小于这个值就先放大（见 [upscaleIfSmall]）。 */
+    private const val UPSCALE_BELOW = 900
+
+    /** 放大的上限，别把中等图放大到爆内存。 */
+    private const val UPSCALE_MAX_LONGEST = 1800
 
     private fun sha256(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes)

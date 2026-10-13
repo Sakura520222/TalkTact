@@ -58,6 +58,15 @@ internal class ViewReader(private val a: Activity) {
     var lastCandidates: String = "（还没找过）"
         private set
 
+    /**
+     * 要不要为**表情包**那一类行去找图（issue #7③）。
+     *
+     * 由 Overlay 每轮按配置写进来：开了「直传图片给多模态模型」才为 true。
+     * 默认 false = 老行为 —— 表情包上本来就没有字可认，找出来的图除了送 OCR 之外没用，
+     * 一屏表情包会被一个接一个画下来，全是「认了：这张图里没字」。
+     */
+    var wantStickerImage: Boolean = false
+
     class BubbleHit(val side: Side, val centerRatio: Double, val widthRatio: Double)
 
     // ---------------- 找锚点 ----------------
@@ -500,8 +509,14 @@ internal class ViewReader(private val a: Activity) {
         // 只有「值得找图的一行」才去找图（有正文的行不用管图；[语音] / [表情] 这类也跳过 ——
         // 那些行里没有能认的文字，第 21 版起不再白认一次），顺手记下现场。
         // 找不到就照旧 null —— 没有这一步时是什么样，现在还是什么样。
-        val scan = if (bubble?.text == null || isImageLikeAttachment(bubble.text.orEmpty())) {
-            scanImage(row, bubble?.text)
+        val bubbleText = bubble?.text.orEmpty()
+        // 值得找图的两类：
+        // ①「图片 / 照片」这类占位 —— 找图是为了认字；
+        // ②表情包 —— 它没有字可认，但开了「直传图片给多模态模型」之后**图本身就是内容**（issue #7③）。
+        // ②只在真的要直传时才找：表情包永远认不出字，白找一轮就是白烧一次电。
+        val wantSticker = wantStickerImage && isStickerAttachment(bubbleText)
+        val scan = if (bubble?.text == null || isImageLikeAttachment(bubbleText) || wantSticker) {
+            scanImage(row, bubble?.text, allowSquareSmall = wantSticker)
         } else {
             null
         }
@@ -548,7 +563,7 @@ internal class ViewReader(private val a: Activity) {
      * 一起认成消息内容（比「认不出来」更糟，还会被当成对方说的话）。现在宁可就这一行返回「没找到」，
      * 回落成原来的 `[ATTACHMENT_TEXT]` 占位 —— 行为和装 OCR 之前一样。
      */
-    private fun scanImage(row: View, bubbleText: String?): ImgScan {
+    private fun scanImage(row: View, bubbleText: String?, allowSquareSmall: Boolean = false): ImgScan {
         val rowW = if (row.width > 0) row.width else row.measuredWidth
         val rowH = if (row.height > 0) row.height else row.measuredHeight
         val minSide = dp(84)
@@ -608,9 +623,11 @@ internal class ViewReader(private val a: Activity) {
                 isAvatarLike = isAvatarLike(h),
                 isSquareSmall = looksSquareSmall(h),
                 isBig = h.big,
+                // 「只能靠 view.draw() 画」的候选在同一档里要让位给真位图（见 ImageCandidateSpec.viaDraw）
+                viaDraw = h.viaDraw,
             )
         }
-        val selected = selectImageCandidate(specs, hits.indexOfFirst { it.view === row })
+        val selected = selectImageCandidate(specs, hits.indexOfFirst { it.view === row }, allowSquareSmall)
         val hit = hits.getOrNull(selected)
 
         val probe = buildString {
@@ -646,7 +663,12 @@ internal class ViewReader(private val a: Activity) {
             if (k >= 1f) raw else scaleBitmap(raw, k) ?: return null
         } else {
             // ② 自绘控件：只能画出来（必须在主线程）
-            drawView(hit, maxSide) ?: return null
+            // 这里**抛**而不是 return null：RowImage 会把这句话记进 `fail`，设置页那行状态
+            // 才分得清「取不到像素」和「取到了但没字」—— issue #7② 的误判就是从这两件事被混成
+            // 一句「这张图里没字」开始的。
+            drawView(hit, maxSide) ?: throw IllegalStateException(
+                "自绘控件取不到像素（${hit.kind}；多半是硬件层 / SurfaceView，view.draw 抓不到内容）",
+            )
         }
         val own = if (bitmap === raw) null else bitmap
         val out = java.io.ByteArrayOutputStream()
@@ -678,12 +700,42 @@ internal class ViewReader(private val a: Activity) {
         val k = scaleFactor(maxOf(hit.w, hit.h), maxSide)
         val w = (hit.w * k).toInt().coerceAtLeast(1)
         val h = (hit.h * k).toInt().coerceAtLeast(1)
-        Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).also { bmp ->
-            val canvas = Canvas(bmp)
-            canvas.scale(k, k)
-            hit.view.draw(canvas)
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.scale(k, k)
+        hit.view.draw(canvas)
+        // 画出来是**一整张同色** = view.draw() 什么都没抓到（见 [isBlank]），
+        // 当「取不到」处理：把一张空白图送去 OCR 只会换回一句「这张图里没字」，
+        // 而那正是 issue #7② 里最难查的一句 —— 它看起来像「图里真的没有字」。
+        if (isBlank(bmp)) {
+            runCatching { bmp.recycle() }
+            null
+        } else {
+            bmp
         }
     }.getOrNull()
+
+    /**
+     * 整张图是不是**一个颜色**。
+     *
+     * 抽样就够：要判的是「什么都没画上去」，不是精确统计。抽 17×17 个点，
+     * 出现第二个颜色就返回 false。空白位图是 `view.draw()` 失败的典型指纹，
+     * 而「聊天里真的有一张纯色图」几乎不存在。
+     */
+    private fun isBlank(bmp: Bitmap): Boolean {
+        if (bmp.width <= 0 || bmp.height <= 0) return true
+        val first = runCatching { bmp.getPixel(0, 0) }.getOrDefault(0)
+        val steps = 17
+        for (i in 0 until steps) {
+            for (j in 0 until steps) {
+                val x = (bmp.width - 1) * i / (steps - 1)
+                val y = (bmp.height - 1) * j / (steps - 1)
+                val px = runCatching { bmp.getPixel(x, y) }.getOrDefault(first)
+                if (px != first) return false
+            }
+        }
+        return true
+    }
 
     /**
      * 反射兜底取正文。

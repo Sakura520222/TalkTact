@@ -1,5 +1,7 @@
 package dev.goutou.wingman.wechat
 
+import dev.goutou.wingman.config.IMAGE_MODE_OCR_THEN_VISION
+import dev.goutou.wingman.config.IMAGE_MODE_VISION
 import dev.goutou.wingman.proxy.ProxyProtocol
 
 /**
@@ -72,9 +74,31 @@ class RowImage(
     val height: Int,
     private val grab: (Int) -> ByteArray?,
 ) {
+    /**
+     * 上一次取字节失败的原因（null = 没失败过）。
+     *
+     * 为什么要留着它（issue #7②）：真机上那句「认了：这张图里没字」把两件事混成了一件 ——
+     * 「这一行的图根本没取到」和「取到了、但识别器认为没有字」。这两件事的排查方向完全相反
+     *（前者要修取图，后者多半是缩略图太小），所以把取图失败的原因单独带出来。
+     */
+    @Volatile
+    var fail: String? = null
+        private set
+
     /** 压成 JPEG。默认最长边走 [ProxyProtocol.OCR_MAX_SIDE]。 */
-    fun jpeg(maxSide: Int = ProxyProtocol.OCR_MAX_SIDE): ByteArray? =
-        runCatching { grab(maxSide) }.getOrNull()
+    fun jpeg(maxSide: Int = ProxyProtocol.OCR_MAX_SIDE): ByteArray? {
+        val r = runCatching { grab(maxSide) }
+        val bytes = r.getOrNull()
+        fail = when {
+            r.isFailure ->
+                r.exceptionOrNull()?.message
+                    ?: "取图异常（${r.exceptionOrNull()?.javaClass?.simpleName}）"
+            bytes == null -> "取不到这一行的图（不是普通位图 / 已回收）"
+            bytes.isEmpty() -> "压出来的 JPEG 是空的"
+            else -> null
+        }
+        return bytes
+    }
 }
 
 /** 交给模型的一条消息。 */
@@ -84,7 +108,20 @@ data class ChatMsg(
     val who: String = "",
     /** true = 占位文本，不是原文（图片/表情/语音） */
     val attachment: Boolean = false,
-)
+) {
+    /**
+     * 这一条消息**对应的图片本体**（JPEG 字节），没有就是 null（issue #7③）。
+     *
+     * 为什么带着它：OCR 认不出来的图（表情包、字太小的缩略图）在模型眼里等于「内容未知」。
+     * 开了「直传图片给多模态模型」之后就把这份字节按 base64 塞进请求，让能看图的模型自己看。
+     *
+     * 刻意**不放进构造参数**：data class 的 equals/hashCode 会把数组按**引用**比，
+     * 而两轮读屏拿到的是两个不同的数组对象 —— 那会让 `screenIdentity`（拿 msgs 算的这一屏指纹）
+     * 每轮都变，缓存永远 miss、在飞的请求被反复作废。它只是「随这条消息走的一份素材」，
+     * 不参与身份判断。
+     */
+    var image: ByteArray? = null
+}
 
 const val ATTACHMENT_TEXT = "[图片/表情/语音]"
 
@@ -114,6 +151,43 @@ private val IMAGE_LIKE = setOf("[图片]", "[照片]", ATTACHMENT_TEXT)
 
 /** 这一行值不值得去找图认字（见 [IMAGE_LIKE]）。 */
 fun isImageLikeAttachment(t: String): Boolean = t.trim() in IMAGE_LIKE
+
+/**
+ * 表情包那一类占位（issue #7③）。
+ *
+ * 和 IMAGE_LIKE 刻意分开：它们**没有字可认**，找图只为了把图直传给多模态模型。
+ * 混进 IMAGE_LIKE 的后果是一屏表情包会被一个接一个画下来送去 OCR，全是「这张图里没字」——
+ * 老代码里那段注释就是为了防这件事写的。
+ */
+private val STICKER_LIKE = setOf("[表情]", "[动画表情]")
+
+/** 这一行是不是表情包（见 [STICKER_LIKE]）。 */
+fun isStickerAttachment(t: String): Boolean = t.trim() in STICKER_LIKE
+
+/**
+ * 这一条消息的图要不要**直传**给多模态模型（issue #7③）。
+ *
+ * 三档的语义见 config/Config.kt 里 IMAGE_MODE_* 那几个常量：
+ * - `ocr`：永不直传（默认，图不出手机）；
+ * - `ocr_then_vision`：**认不出字、或认出来的字太少**时才直传 —— 这正是 issue #7 报的两种情况
+ *  （含字截图被认成「没字」、表情包压根没有内容）；
+ * - `vision`：总是直传（模型看原图最准，代价是每次都多花那份图的钱）。
+ *
+ * @param ocr 这一行认出来的文字（null / 空 = 没认出来）
+ */
+fun shouldSendImage(mode: String, ocr: String?): Boolean = when (mode) {
+    IMAGE_MODE_VISION -> true
+    IMAGE_MODE_OCR_THEN_VISION -> ocr.orEmpty().trim().length < VISION_FALLBACK_MIN_CHARS
+    else -> false
+}
+
+/**
+ * `ocr_then_vision` 里「认出来的字太少」的门槛。
+ *
+ * 12 个字：短于这个长度的识别结果基本都是「扫到一两个词 / 几个数字」这种没什么用的残片
+ *（真正有价值的一段话远不止 12 个字），那时候让模型看原图比拿着一地碎词强。
+ */
+const val VISION_FALLBACK_MIN_CHARS = 12
 
 /** 认出来的图片文字写进上下文时的前缀（模型靠它知道「这是从图里认出来的，可能有错字」）。 */
 const val IMAGE_PREFIX = "[图片] "

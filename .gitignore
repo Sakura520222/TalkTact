@@ -16,3 +16,6 @@ captures/
 
 # 正式版留档：唯一允许入库的 APK（见 release/README.md）
 !release/*.apk
+
+# Kotlin 2.0 的会话目录（本机构建产物）
+.kotlin/

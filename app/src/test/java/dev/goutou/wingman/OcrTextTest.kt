@@ -31,11 +31,19 @@ class OcrTextTest {
     }
 
     @Test
-    fun `超长截断并加省略号`() {
-        val out = ocrText(listOf("啊".repeat(50)), max = 10)
-        assertEquals(11, out.length) // 10 个字 + 一个省略号
-        assertTrue(out.endsWith("…"))
-        assertTrue(out.startsWith("啊"))
+    fun `超长时首尾都留，不是只留开头`() {
+        // issue #7②：聊天截图里最新那条在底部，只截开头会把最该给模型看的内容丢掉。
+        // 所以截断改成「开头 1/3 + 省略说明 + 结尾 2/3」。
+        val body = "头".repeat(30) + "尾".repeat(30)
+        val out = ocrText(listOf(body), max = 12)
+        assertTrue("要保留开头（给上下文）: $out", out.startsWith("头"))
+        assertTrue("要保留结尾（最新内容）: $out", out.endsWith("尾"))
+        assertTrue("要写清中间省略了多少: $out", out.contains("省略"))
+    }
+
+    @Test
+    fun `内容没超上限就原样返回，不加省略说明`() {
+        assertEquals("啊啊啊", ocrText(listOf("啊啊啊"), max = 10))
     }
 
     @Test

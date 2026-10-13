@@ -31,6 +31,17 @@ const val PREF_NAME = "cfg"
 const val DEFAULT_BASE = "https://api.openai.com/v1"
 const val DEFAULT_MODEL = "gpt-4o-mini"
 
+/**
+ * 图片怎么交给模型（见 [ConfigData.imageMode]，issue #7③）。
+ *
+ * 默认 [IMAGE_MODE_OCR]：只在本机认字，**图不出手机** —— 这是这个模块一开始就守住的口径，
+ * 换任何一档都等于把图片本体发给配置的那个接口，所以另外两档必须由用户显式选，
+ * 界面上也要把这句话写出来。
+ */
+const val IMAGE_MODE_OCR = "ocr"
+const val IMAGE_MODE_OCR_THEN_VISION = "ocr_then_vision"
+const val IMAGE_MODE_VISION = "vision"
+
 /** 跨进程读写的 key 集中放一处，免得上游（App）和下游（注入微信的代码）写错字符串。 */
 object Keys {
     const val BASE = "base_url"
@@ -152,6 +163,8 @@ object Keys {
      * 默认开 —— 但它**先要本地代理开着**才有地方认（没代理时注入侧直接跳过、用老占位）。
      */
     const val OCR_ON = "ocr_on"
+    /** 图片交给模型的方式：ocr / ocr_then_vision / vision（见 [ConfigData.imageMode]） */
+    const val IMAGE_MODE = "image_mode"
     /** 注入侧回传：最近一次图片识别的结果（认出几个字 / 为什么没认），设置页显示它 */
     const val OCR_INFO = "last_ocr"
     const val OCR_AT = "last_ocr_at"
@@ -308,6 +321,18 @@ data class ConfigData(
      */
     val ocrEnabled: Boolean = true,
     /**
+     * 图片怎么交给模型（issue #7③）。
+     *
+     * - [IMAGE_MODE_OCR]（默认）：只在本机认字，图不出手机；
+     * - [IMAGE_MODE_OCR_THEN_VISION]：认不出字 / 认出来的字太少（< 12 字）时，才把图直传给多模态模型；
+     * - [IMAGE_MODE_VISION]：总是直传（包括表情包 —— 它本来就没有字可认）。
+     *
+     * ⚠️ 后两档会把**图片本体**发给配置的那个接口。这是对「图片不出手机」的一次明确让步，
+     * 所以默认关，而且界面上要把这句话写出来（见 ui/Screens.kt 的「图片文字识别」卡片）。
+     * 另外直传只在**接口形态支持图片**时才有意义（见 llm/ApiShape.kt）。
+     */
+    val imageMode: String = IMAGE_MODE_OCR,
+    /**
      * 查 IP 归属地（「运行状态 → 接口自检」里那两行省份）。默认开。
      *
      * 归属地是**整个模块唯一**一处会把你的 IP 发给第三方的地方（见 llm/NetInfo.kt）——
@@ -392,6 +417,7 @@ data class ConfigData(
                 .filter { it.isNotBlank() }
                 .toSet(),
             ocrEnabled = p.getBoolean(Keys.OCR_ON, true),
+            imageMode = p.getString(Keys.IMAGE_MODE, IMAGE_MODE_OCR).orEmpty().ifBlank { IMAGE_MODE_OCR },
             geoEnabled = p.getBoolean(Keys.GEO_ON, true),
             geoEndpoint = p.getString(Keys.GEO_ENDPOINT, "").orEmpty(),
         )
@@ -492,6 +518,7 @@ class ConfigStore(context: Context) {
             .putBoolean(Keys.WHITELIST_ON, d.whitelistEnabled)
             .putStringSet(Keys.WHITELIST, d.whitelist.map { Roles.normalizeKey(it) }.filter { it.isNotBlank() }.toHashSet())
             .putBoolean(Keys.OCR_ON, d.ocrEnabled)
+            .putString(Keys.IMAGE_MODE, d.imageMode)
             .putBoolean(Keys.GEO_ON, d.geoEnabled)
             .putString(Keys.GEO_ENDPOINT, d.geoEndpoint.trim())
             .apply()
@@ -563,6 +590,15 @@ class ConfigStore(context: Context) {
     /** 清空「已忽略」—— 恢复整份候选。 */
     fun clearIgnored() {
         sp.edit().remove(Keys.CHAT_IGNORED).apply()
+    }
+
+    /**
+     * 只改「图片怎么交给模型」这一项，**立刻落盘**（和 [saveOcr] 同一个理由）：
+     * 它和识别开关是同一件事的两半，改完就要在微信里试，不该还要记得回来点保存。
+     * 也刻意只写这一个 key，不整体 save() —— 同一页别的卡片可能还在编辑、还没点保存。
+     */
+    fun saveImageMode(mode: String) {
+        sp.edit().putString(Keys.IMAGE_MODE, mode).apply()
     }
 
     /**

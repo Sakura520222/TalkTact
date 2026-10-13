@@ -27,6 +27,17 @@ object ProxyProtocol {
     const val PATH_OCR = "/proxy/ocr"
 
     /**
+     * 「代理没在跑，起一下」—— 注入侧连不上回环端口时发给 App 的唤醒广播（issue #7①）。
+     *
+     * 为什么是广播而不是别的：App 进程可能已经被系统回收了，得有个**写在 manifest 里的静态接收器**
+     * 才能让系统为了投递它而把进程重新拉起来（见 proxy/ProxyWakeReceiver）。
+     */
+    const val ACTION_WAKE = "io.github.shibry88_netizen.talktact.PROXY_WAKE"
+
+    /** 唤醒广播里带的凭据：就是 [PATH_CHAT] 那份 token，不引入第二套。 */
+    const val EXTRA_TOKEN = "token"
+
+    /**
      * 送去识别的图：最长边（px）与最大字节数。
      *
      * 图是走回环从微信进程传到 App 的（两个进程不同 UID，只能这么传），所以要压：

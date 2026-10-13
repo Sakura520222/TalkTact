@@ -24,5 +24,12 @@ fun ocrText(lines: List<String>, max: Int = OCR_MAX_CHARS): String {
         .filter { it.isNotEmpty() }
         .joinToString("\n")
     if (max <= 0 || joined.length <= max) return joined
-    return joined.take(max) + "…"
+    // 超长时**首尾都留**，而不是只留开头（issue #7②）。
+    // 聊天截图里「最新的那条」在**底部** —— 只截开头等于把最该给模型看的内容丢掉；
+    // 而文档类长图的信息又常常在开头。所以切两段：开头 1/3 给上下文，结尾 2/3 给最新内容。
+    val head = max / 3
+    val tail = max - head
+    return joined.take(head) +
+        "\n…（中间省略 ${joined.length - max} 字）…\n" +
+        joined.takeLast(tail)
 }

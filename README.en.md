@@ -7,7 +7,7 @@ TalkTact puts a **small button** in the top-right corner of a WeChat chat screen
 LLM-compatible endpoint of your choice, and **filling the reply box** is all it does — it **never sends** for you.
 The card is collapsed by default, so it does not cover your messages.
 
-Current version: **v0.8.11**. See [CHANGELOG.md](CHANGELOG.md) for the history and
+Current version: **v0.8.12**. See [CHANGELOG.md](CHANGELOG.md) for the history and
 [IMPROVEMENTS.md](IMPROVEMENTS.md) for the design notes.
 
 ---

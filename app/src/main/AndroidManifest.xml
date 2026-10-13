@@ -7,6 +7,17 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- 前台服务的常驻通知（13+ 才有这个权限；用户不给也能跑，只是通知不显示） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!--
+      重启 / 覆盖安装之后把本地代理补起来。
+      为什么现在才加（issue #7）：以前「不做开机自启」是刻意的取舍，代价是重启后代理不会自己回来；
+      真机反馈推翻了那条假设 —— 用户人在微信里，不会想起来去开 App。
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!--
+      设置页那个「加电池优化白名单」按钮用的（ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS）。
+      不上应用商店，所以不受 Play 对这条权限的额外审核约束；系统不支持时会退回打开设置列表页。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
     <!--
       心跳：模块在微信进程里跑起来后会广播一次，App 收到才认定「微信内已生效」。
@@ -63,6 +74,33 @@
         <receiver android:name=".HeartbeatReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="io.github.shibry88_netizen.talktact.HEARTBEAT" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          重启 / 覆盖安装 / 快启后补起本地代理（issue #7①）。
+          这几个 action 是 Android 12+ 里少数**允许后台启动前台服务**的豁免场景。
+        -->
+        <receiver android:name=".BootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="com.htc.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          「代理没在跑，起一下」。**必须静态注册**：App 进程可能已经被系统回收，
+          只有写在 manifest 里的接收器才能让系统为了投递而把进程重新拉起来。
+          门在 token 校验上（见 ProxyWakeReceiver），所以它 exported 是安全的。
+        -->
+        <receiver
+            android:name=".proxy.ProxyWakeReceiver"
+            android:exported="true"
+            android:permission="io.github.shibry88_netizen.talktact.permission.HEARTBEAT">
+            <intent-filter>
+                <action android:name="io.github.shibry88_netizen.talktact.PROXY_WAKE" />
             </intent-filter>
         </receiver>
     </application>

@@ -66,6 +66,11 @@ internal fun buildApiRequest(
     temperature: Double,
     maxTokens: Int,
     jsonMode: Boolean,
+    /**
+     * 要随这条请求发出去的图片（JPEG 字节）—— issue #7③ 的「直传图片给多模态模型」。
+     * null = 纯文字请求（绝大多数情况），这时请求体与老版本**逐字节相同**。
+     */
+    image: ByteArray? = null,
 ): ApiRequest {
     val fields = LinkedHashMap<String, JsonValue>()
     fields["model"] = str(model)
@@ -79,24 +84,24 @@ internal fun buildApiRequest(
                 fields["messages"] = arr(
                     listOf(
                         obj("role" to str("system"), "content" to str(system)),
-                        obj("role" to str("user"), "content" to str(user)),
+                        obj("role" to str("user"), "content" to userContent(user, image)),
                     ),
                 )
             } else {
-                fields["messages"] = arr(listOf(obj("role" to str("user"), "content" to str(user))))
+                fields["messages"] = arr(listOf(obj("role" to str("user"), "content" to userContent(user, image))))
             }
         }
         ApiShape.RESPONSES -> {
             // Responses：system 走 instructions，输入走 input；输出上限是 max_output_tokens
             if (system.isNotBlank()) fields["instructions"] = str(system)
-            fields["input"] = str(user)
+            fields["input"] = responsesInput(user, image)
             if (maxTokens > 0) fields["max_output_tokens"] = num(maxTokens)
         }
         ApiShape.ANTHROPIC -> {
             // Anthropic：system 是顶层字段，messages 只放 user/assistant；max_tokens **必填**
             if (system.isNotBlank()) fields["system"] = str(system)
             fields["max_tokens"] = num(if (maxTokens > 0) maxTokens else ANTHROPIC_FALLBACK_MAX_TOKENS)
-            fields["messages"] = arr(listOf(obj("role" to str("user"), "content" to str(user))))
+            fields["messages"] = arr(listOf(obj("role" to str("user"), "content" to anthropicContent(user, image))))
         }
     }
     val auth = if (shape == ApiShape.ANTHROPIC) {
@@ -107,6 +112,75 @@ internal fun buildApiRequest(
     }
     return ApiRequest(apiUrl(shape, base, customPath), Json.encode(JsonValue.Obj(fields)), auth)
 }
+
+/**
+ * user 消息的 content（OpenAI 兼容形态）。
+ *
+ * 没图时**仍然是纯字符串** —— 有些中转对 `content: [...]` 支持不好，而没图时两者语义完全等价，
+ * 所以只在真带图时才换成数组（老配置发出去的字节和以前一模一样）。
+ */
+internal fun userContent(user: String, image: ByteArray?): JsonValue {
+    if (image == null || image.isEmpty()) return str(user)
+    return arr(
+        listOf(
+            obj("type" to str("text"), "text" to str(user)),
+            obj("type" to str("image_url"), "image_url" to obj("url" to str(jpegDataUrl(image)))),
+        ),
+    )
+}
+
+/** Responses 形态的 input：没图就是一句话；带图时用官方文档那种 input_text / input_image 数组。 */
+internal fun responsesInput(user: String, image: ByteArray?): JsonValue {
+    if (image == null || image.isEmpty()) return str(user)
+    return arr(
+        listOf(
+            obj(
+                "role" to str("user"),
+                "content" to arr(
+                    listOf(
+                        obj("type" to str("input_text"), "text" to str(user)),
+                        obj("type" to str("input_image"), "image_url" to str(jpegDataUrl(image))),
+                    ),
+                ),
+            ),
+        ),
+    )
+}
+
+/**
+ * Anthropic 形态的 content。
+ *
+ * 和 OpenAI 的两处不同：图是**独立的 content 块**、而且 base64 拆成 media_type + data 两个字段
+ *（不是 data URL）。顺序刻意把图放前面、文字放后面 —— 官方示例就是这个顺序。
+ */
+internal fun anthropicContent(user: String, image: ByteArray?): JsonValue {
+    if (image == null || image.isEmpty()) return str(user)
+    return arr(
+        listOf(
+            obj(
+                "type" to str("image"),
+                "source" to obj(
+                    "type" to str("base64"),
+                    "media_type" to str("image/jpeg"),
+                    "data" to str(base64Jpeg(image)),
+                ),
+            ),
+            obj("type" to str("text"), "text" to str(user)),
+        ),
+    )
+}
+
+/** `data:image/jpeg;base64,...` —— OpenAI 兼容接口的 image_url 认这个写法，不用先上传文件。 */
+internal fun jpegDataUrl(jpeg: ByteArray): String = "data:image/jpeg;base64," + base64Jpeg(jpeg)
+
+/**
+ * base64 编码。
+ *
+ * 刻意用 `java.util.Base64` 而不是 `android.util.Base64`：这段代码在**注入进程**和
+ * **单测的 JVM** 两边都要跑，前者两个都有，后者只有 java.util 那个
+ *（android.util 在纯 JVM 单测里是 "not mocked" 直接抛）。minSdk 31 远高于它要求的 API 26。
+ */
+internal fun base64Jpeg(jpeg: ByteArray): String = java.util.Base64.getEncoder().encodeToString(jpeg)
 
 /** 从返回里取「正文 / token 数 / 模型名」。取不到正文返回 null（调用方负责报错）。 */
 internal fun parseApiReply(shape: ApiShape, root: JsonValue): ApiReply? = when (shape) {

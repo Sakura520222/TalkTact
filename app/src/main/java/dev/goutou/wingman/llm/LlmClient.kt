@@ -1,9 +1,12 @@
 package dev.goutou.wingman.llm
 
 import dev.goutou.wingman.config.ConfigData
+import dev.goutou.wingman.config.IMAGE_MODE_OCR
 import dev.goutou.wingman.config.replyPlan
 import dev.goutou.wingman.proxy.ProxyProtocol
 import dev.goutou.wingman.wechat.ChatMsg
+import dev.goutou.wingman.wechat.IMAGE_PREFIX
+import dev.goutou.wingman.wechat.shouldSendImage
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
@@ -46,6 +49,11 @@ class LlmClient(
      * 不带的话第二路会被代理按第一套转发 —— 症状是「第二套填对了却报 Key 不对」。
      */
     private val second: Boolean = false,
+    /**
+     * 回环代理连不上时叫一声（issue #7①）。由调用方给 —— 只有它手上有微信那边的 Context。
+     * 默认 null = 不管（App 里「试一试」那条路和单测都走这个默认）。
+     */
+    private val onProxyUnreachable: (() -> Unit)? = null,
 ) {
 
     /** 当前接口形态。差异只有三处：URL 路径 / 请求体 / 鉴权头（见 llm/ApiShape.kt）。 */
@@ -132,6 +140,11 @@ class LlmClient(
             append("聊天记录（时间顺序，最后一条是对方刚发的）：\n").append(msgs.asTranscript())
             append("\n\n只输出系统要求的那个 JSON 对象，不要任何解释文字。")
         }
+        // 直传图片（issue #7③）：只取**最后一条带图的**消息，带不带、带哪张由配置说了算
+        //（见 pickImageForVision）。一条请求塞好几张图既贵，也会让「说的是哪张」变含糊。
+        val visionImage = pickImageForVision(cfg.imageMode, msgs)
+        tracedImageBytes = visionImage?.size ?: 0
+
         // 请求体与鉴权头交给「接口形态」去组装（llm/ApiShape.kt）：
         // 形态差异只有三处 —— URL 路径 / 请求体 / 鉴权头，所以这里不再自己拼。
         // 严格 JSON 输出只加在「生成候选」这条路上（jsonMode）—— 改写和风格提炼走 complete()，
@@ -144,6 +157,7 @@ class LlmClient(
             model = cfg.model,
             system = system,
             user = userText,
+            image = visionImage,
             temperature = cfg.temperature,
             // 条数多了**必须给够输出预算**：每条候选 40~45 字、再加一层 JSON 字段，
             // 「输出上限」那几档（200/400/600）在勾到十几种风格时一定装不下 ——
@@ -241,6 +255,9 @@ class LlmClient(
     }
 
 
+    /** 这一轮带出去的图片字节数（0 = 没带）。只用于 trace 里说明「这次确实发了图」。 */
+    private var tracedImageBytes: Int = 0
+
     /** 把这次实际发出去的 system 提示词 / user 消息 / 模型原始返回交给调用方存档。 */
     private fun trace(systemText: String, userText: String, response: String) {
         val cb = onTrace ?: return
@@ -250,6 +267,10 @@ class LlmClient(
             append(systemText.take(300))
             if (systemText.length > 300) append("\n…（后面省略 ${systemText.length - 300} 字）")
             append("\n\n-------- user 消息 --------\n").append(userText)
+            if (tracedImageBytes > 0) {
+                append("\n（这一条请求还带了**一张图片**：${tracedImageBytes / 1024}KB，多模态直传 —— ")
+                append("见设置里的「图片怎么交给模型」）")
+            }
             append("\n\n-------- 模型原始返回 --------\n").append(response.take(1200))
         }
         runCatching { cb(body) }
@@ -342,7 +363,14 @@ class LlmClient(
                 last = e
                 if (!e.retryable || attempt == 1) break
                 try {
-                    Thread.sleep(500L * (attempt + 1))
+                    // 代理那条路失败时先叫一下 App（issue #7①）：它可能已经被系统回收，
+                    // 端口跟着没了 —— 被叫醒之后这一次重试往往就能成。多等一会儿是给进程启动留时间。
+                    if (!direct && viaProxy()) {
+                        onProxyUnreachable?.invoke()
+                        Thread.sleep(900)
+                    } else {
+                        Thread.sleep(500L * (attempt + 1))
+                    }
                 } catch (ie: InterruptedException) {
                     Thread.currentThread().interrupt()
                     break
@@ -437,6 +465,28 @@ class LlmClient(
             runCatching { conn.disconnect() }
         }
     }
+}
+
+/**
+ * 这次请求要带哪张图（issue #7③）。
+ *
+ * 规则克制到只有三行，但每条都有理由：
+ * - **只在配置允许时带**（见 [shouldSendImage]）；`ocr` 档直接返回 null，一个字节都不取。
+ * - **只取最后一条带图的**：聊天场景里「最新那条」才是要回的那条；一条请求塞好几张图
+ *   既贵、也会让模型搞不清该看哪张。
+ * - `ocr_then_vision` 档按**那一条自己**的识别结果判：识别出来的字够用就不发图
+ *   （字够用＝模型读文字就行，没必要为一张已经读通的图多花那份钱）。
+ */
+internal fun pickImageForVision(mode: String, msgs: List<ChatMsg>): ByteArray? {
+    if (mode == IMAGE_MODE_OCR) return null
+    for (msg in msgs.asReversed()) {
+        val img = msg.image ?: continue
+        // 图片消息写进上下文的样子是「[图片] 认出来的字」（见 IMAGE_PREFIX）；
+        // 不是这个形状的（表情包那种占位）就当「没认出来」，交给 shouldSendImage 判
+        val ocr = if (msg.text.startsWith(IMAGE_PREFIX)) msg.text.removePrefix(IMAGE_PREFIX) else null
+        if (shouldSendImage(mode, ocr)) return img
+    }
+    return null
 }
 
 /** 一条候选大概要多少 token：正文 40~45 个中文字（≈45）+ `"style":"xx","text":"…"` 那层壳（≈20）。 */

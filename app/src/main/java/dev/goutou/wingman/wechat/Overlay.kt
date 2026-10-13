@@ -21,6 +21,7 @@ import android.content.SharedPreferences
 import dev.goutou.wingman.XposedApi
 import dev.goutou.wingman.Heartbeat
 import dev.goutou.wingman.config.ConfigData
+import dev.goutou.wingman.config.IMAGE_MODE_OCR
 import dev.goutou.wingman.config.chatBlocked
 import dev.goutou.wingman.config.Keys
 import dev.goutou.wingman.config.Roles
@@ -75,8 +76,13 @@ internal class Panel(private val a: Activity) {
 
     private val reader = ViewReader(a)
     private val parser = ChatParser(a.resources.displayMetrics.widthPixels)
-    /** 图片文字识别：把行里的图送去 App 认字（同一张图只发一次，认不出来回落成占位）。 */
-    private val ocr = ImageOcr()
+    /**
+     * 图片文字识别：把行里的图送去 App 认字（同一张图只发一次，认不出来回落成占位）。
+     *
+     * 回调那条是 issue #7①：回环连不上时叫一声 App —— 它可能已经被系统回收了，
+     * 而被叫醒之后这一轮请求还能救回来（见 [ProxyWake]）。
+     */
+    private val ocr = ImageOcr { wakeAppForProxy() }
     private val handler = Handler(Looper.getMainLooper())
     /**
      * 配置。注入进程里**只读**：App 侧写本地 SharedPreferences，框架把改动实时推到这里。
@@ -760,6 +766,9 @@ internal class Panel(private val a: Activity) {
             return
         }
 
+        // 表情包那一类行要不要找图，取决于「图会不会被直传」（issue #7③）：
+        // 配置说只认字的时候，表情包行压根不去找图 —— 找了也只有一句「这张图里没字」
+        reader.wantStickerImage = cfg.imageMode != IMAGE_MODE_OCR
         val rows = reader.snapshot(list)
         // 图片先排进后台去认（这一步不阻塞）。还有图没认完就这一轮先不分析 ——
         // 免得先拿 [图片] 占位问一遍、认完再问一遍（既费 token，两次结果还不一样）。
@@ -774,7 +783,14 @@ internal class Panel(private val a: Activity) {
             return
         }
         // 到这儿每张图都已经有确定结果了（认到的文字 / 确实没字 / 失败冷却），解析只是个纯查询
-        val msgs = parser.parse(rows) { img -> ocr.textOf(img) }.takeLast(cfg.ctx)
+        val msgs = parser.parse(
+            rows,
+            imageText = { img -> ocr.textOf(img) },
+            // 图本体只在真的要直传时才被取走（ChatParser 里按 shouldSendImage 判过）——
+            // 取一次就有一次画图 + 编码的成本，配置说只认字时一个字节都不该多拿
+            imageBytes = { img -> img.jpeg() },
+            imageMode = cfg.imageMode,
+        ).takeLast(cfg.ctx)
         // 「这一屏」的稳定键：只跟**看得见的内容**有关（纯函数，单测见 ConversationStateTest）。
         screenKey = screenIdentity(observedName, reader.fingerprint(list), msgs)
         // 只记**条数和方向**，不记正文：轨迹会顺着心跳回传、常驻 App 本地，
@@ -1287,6 +1303,17 @@ internal class Panel(private val a: Activity) {
         }
     }
 
+    /**
+     * 回环代理连不上时把 App 叫起来（issue #7①）。
+     *
+     * 这里只负责把「当前配置 + 微信的 Context」交给 [ProxyWake] —— 开关判断与 60 秒冷却都在那边，
+     * 所以这里可以被高频调用，不会变成「每条候选都去拉起一次 App」。
+     */
+    private fun wakeAppForProxy() {
+        val cfg = config ?: return
+        runCatching { ProxyWake.tryWake(a, cfg, "回环请求失败") }
+    }
+
     private fun ask(cfg: ConfigData, msgs: List<ChatMsg>, fingerprint: String, roleContext: String?) {
         job = Job.Analyze(fingerprint)
         lastCallAt = System.currentTimeMillis()
@@ -1311,11 +1338,16 @@ internal class Panel(private val a: Activity) {
             try {
                 if (cfg.graded) {
                     val out = Graded.run(
-                        replyClient = LlmClient(cfg, onTrace = { traces.add("【写回复一路】\n$it") }),
+                        replyClient = LlmClient(
+                            cfg,
+                            onTrace = { traces.add("【写回复一路】\n$it") },
+                            onProxyUnreachable = { wakeAppForProxy() },
+                        ),
                         riskClient = LlmClient(
                             cfg.riskEndpoint(),
                             onTrace = { traces.add("【风险评估一路】\n$it") },
                             second = true,
+                            onProxyUnreachable = { wakeAppForProxy() },
                         ),
                         skillPrompt = cfg.prompt,
                         msgs = msgs,
@@ -1334,7 +1366,11 @@ internal class Panel(private val a: Activity) {
                         )
                     }
                 } else {
-                    val result = LlmClient(cfg, onTrace = { traces.add(it) }).analyze(msgs, roleContext)
+                    val result = LlmClient(
+                        cfg,
+                        onTrace = { traces.add(it) },
+                        onProxyUnreachable = { wakeAppForProxy() },
+                    ).analyze(msgs, roleContext)
                     suggestion = result.suggestion
                     tokens = result.totalTokens
                 }
