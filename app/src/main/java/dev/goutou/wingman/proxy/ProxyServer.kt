@@ -154,8 +154,25 @@ class ProxyServer(private val context: Context) {
             if (target.baseUrl.isBlank()) return respond(output, 502, errorBody("App 里还没填$which"))
             if (target.apiKey.isBlank()) return respond(output, 502, errorBody("App 里还没填$which 的 API Key"))
 
-            val length = headers["content-length"]?.toIntOrNull() ?: 0
-            val body = if (length > 0) ByteArray(length).also { readFully(input, it) } else ByteArray(0)
+            // 请求体**只认 Content-Length**，认不到就明确报错 —— 绝不静默转发一个空 body。
+            // ⚠️ 以前这里写的是 `?: 0`：没有 Content-Length 时 body 就被当成空数组，然后照样转发给上游。
+            // 于是「客户端用了分块传输（chunked）」这种情况会变成「发送侧说发了、上游说没收到」，
+            // 只在服务商那边回一句看不懂的 400，本机日志里连个线索都没有 —— 极难查。
+            // 现在这种请求会被挡在这里，状态码和原因都写清楚。
+            // 发送侧请把长度写死（setFixedLengthStreamingMode），见 LlmClient.once / ImageOcr.post。
+            val length = headers["content-length"]?.toIntOrNull() ?: -1
+            if (length <= 0) {
+                ProxyState.lastResult = "拒绝：请求体没有 Content-Length"
+                return respond(
+                    output,
+                    411,
+                    errorBody(
+                        "请求体长度未知：这条请求既没有 Content-Length，本代理也不支持分块传输。" +
+                            "发送侧请把长度写死（setFixedLengthStreamingMode）再发。",
+                    ),
+                )
+            }
+            val body = ByteArray(length).also { readFully(input, it) }
 
             val started = System.currentTimeMillis()
             val upstream = forward(target.baseUrl, target.apiKey, body, headers["content-type"])
@@ -230,11 +247,15 @@ class ProxyServer(private val context: Context) {
         }
     }
 
+    /**
+     * 读满 [into]。**读不满就抛** —— 半个 body 转发出去，上游只会回一句看不懂的错，
+     * 而真正的病因（发送侧少写了字节）就此被掩盖。抛出去会走统一的 502 分支，原因写在响应里。
+     */
     private fun readFully(input: BufferedInputStream, into: ByteArray) {
         var off = 0
         while (off < into.size) {
             val n = input.read(into, off, into.size - off)
-            if (n < 0) break
+            if (n < 0) throw IllegalStateException("请求体不完整（还差 ${into.size - off} 字节）")
             off += n
         }
     }

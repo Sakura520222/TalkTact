@@ -1,6 +1,7 @@
 package dev.goutou.wingman.llm
 
 import dev.goutou.wingman.config.ConfigData
+import dev.goutou.wingman.config.replyPlan
 import dev.goutou.wingman.proxy.ProxyProtocol
 import dev.goutou.wingman.wechat.ChatMsg
 import java.io.IOException
@@ -49,6 +50,17 @@ class LlmClient(
 
     /** 当前接口形态。差异只有三处：URL 路径 / 请求体 / 鉴权头（见 llm/ApiShape.kt）。 */
     private val shape: ApiShape get() = shapeOf(cfg.apiShape)
+
+    /**
+     * 这一轮要用几条、什么风格（用户在设置页选的，见 config/ConfigData.replyCount）。
+     *
+     * 在这里算一次，不到处现算 —— 好处是**同一轮调用里规格是稳定的**：
+     * 分级模式两路并行时算两次也不会算出两个不一样的结果。
+     *
+     * 用配置上的 `replyPlan` 扩展而不是自己 `ReplyPlan.of(...)`：那条路径把
+     * **用户自定义的风格**也一起认了（见 config/Config.kt）。
+     */
+    private val plan: ReplyPlan get() = cfg.replyPlan
 
     /**
      * 出站地址。
@@ -103,6 +115,12 @@ class LlmClient(
         requireReady()
         if (msgs.isEmpty()) throw LlmException("没读到聊天内容", null)
 
+        // 传进来的 systemText 是**当初那次配置下**拼好、存进偏好的快照。
+        // 用户在设置页改了条数/风格之后它就是过期的（里面还写着「恰好给 3 条」），
+        // 所以这里按当前规格重拼一遍：只换掉「规格要求」和「输出契约」两段，正文一个字不动
+        //（提示词页是自由编辑的，不能拿内置 core 覆盖用户自己写的字）。
+        val systemBase = applyReplyPlan(systemText, plan)
+
         val start = System.currentTimeMillis()
         // trace 要能原样看到「发出去的是什么」，所以用传进来的那份，而不是回头读 cfg
         // 顺序刻意是「跨请求不变的东西在前、每次都变的东西在后」：
@@ -127,7 +145,11 @@ class LlmClient(
             system = system,
             user = userText,
             temperature = cfg.temperature,
-            maxTokens = cfg.maxTokens,
+            // 条数多了**必须给够输出预算**：每条候选 40~45 字、再加一层 JSON 字段，
+            // 「输出上限」那几档（200/400/600）在勾到十几种风格时一定装不下 ——
+            // 装不下的后果是输出被截断，只能走「抢救」那条路，用户看到的是「勾了 8 条只回来 4 条」。
+            // 所以配置的额度只当**下限**：不够用时按条数往上抬。配置成 0（无限制）就原样传 0。
+            maxTokens = outputBudget(cfg.maxTokens, plan.count),
             jsonMode = cfg.jsonMode,
         )
 
@@ -137,7 +159,7 @@ class LlmClient(
         var attempt = 0
         var tokensTotal = 0
         while (true) {
-            val system = if (attempt == 0) systemText else systemText + "\n\n" + JSON_NUDGE
+            val system = if (attempt == 0) systemBase else systemBase + "\n\n" + JSON_NUDGE
             try {
                 val req = requestFor(system)
                 val root = parseResponse(post(outboundUrl(req.url), req.body, authHeaders = req.authHeaders))
@@ -150,7 +172,8 @@ class LlmClient(
                 trace(system, userText, content)
                 tokensTotal += reply.tokens
                 val parsed = try {
-                    SuggestionParser.parse(content, requireReplies)
+                    // 最多保留 plan.count + 1 条：模型多给一条也不丢（丢了 best 的下标就全错位）
+                    SuggestionParser.parse(content, requireReplies, maxReplies = plan.count + 1)
                 } catch (e: LlmException) {
                     trace(system, userText, "（解析失败，${if (attempt == 0) "补正后重试一次" else "不再重试"}）${e.message}\n---\n$content")
                     if (attempt == 0 && e.retryable) {
@@ -335,6 +358,8 @@ class LlmClient(
         direct: Boolean = false,
         authHeaders: Map<String, String> = emptyMap(),
     ): String {
+        // 先把 body 编成字节：下面要按它的长度走**固定长度上传**（见 setFixedLengthStreamingMode 的说明）
+        val bytes = payload.toByteArray(Charsets.UTF_8)
         val conn = try {
             URL(url).openConnection() as HttpURLConnection
         } catch (t: Throwable) {
@@ -347,6 +372,16 @@ class LlmClient(
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             conn.setRequestProperty("Accept", "application/json")
+            // ⚠️ 长度**必须写死**（且必须在 getOutputStream() 之前调用）。走本地代理时，
+            // 代理那侧是**严格按 Content-Length 读 body** 的（见 ProxyServer），
+            // 读不到就直接回 411 拒绝，而不是替发送侧猜一个空 body。
+            // 不写死的话，安卓的 HttpURLConnection 在 body 没被它自己缓存住时会改用
+            // `Transfer-Encoding: chunked` —— 代理于是拿不到 Content-Length，这条请求整个失败。
+            // 纯文字、短请求小到能命中它内部那点缓冲，所以一直是好的；
+            // 请求体一旦涨大（长聊天记录 / 带上 base64 图片）就越过那条线 ——
+            // 表现是「平时都好，偏偏某几次发不出去」。
+            // 识图那条上传（wechat/ImageOcr.post）当初就是这么修的，这里漏了那一句。
+            conn.setFixedLengthStreamingMode(bytes.size)
             // 「走不走代理」在这里只算一次，凭据和接口头都用它 —— 两者分开判断过一次，出了 401
             val proxyRoute = !direct && viaProxy()
             if (proxyRoute) {
@@ -361,7 +396,7 @@ class LlmClient(
                 authHeaders.forEach { (k, v) -> conn.setRequestProperty(k, v) }
                 if (authHeaders.isEmpty()) conn.setRequestProperty("Authorization", "Bearer ${cfg.apiKey}")
             }
-            conn.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+            conn.outputStream.use { it.write(bytes) }
 
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
@@ -403,6 +438,23 @@ class LlmClient(
         }
     }
 }
+
+/** 一条候选大概要多少 token：正文 40~45 个中文字（≈45）+ `"style":"xx","text":"…"` 那层壳（≈20）。 */
+private const val TOKENS_PER_REPLY = 65
+
+/** JSON 外壳（intent / risk / note / best / why + 括号逗号）大概的量。 */
+private const val TOKENS_JSON_SHELL = 140
+
+/**
+ * 这次请求的输出预算：**配置的额度是下限，不是上限**。
+ *
+ * 为什么要往上抬：勾的风格多的时候模型要写很多条，那几档额度（200 / 400 / 600）根本装不下，
+ * 输出会被截断 —— 而这是最难查的一类失败（内容少了一半，看起来只像模型偷懒）。
+ * 配置成 0 = 无限制，原样传 0（组装请求时不带 max_tokens）。
+ */
+internal fun outputBudget(configured: Int, replies: Int): Int =
+    if (configured <= 0) 0
+    else maxOf(configured, replies.coerceAtLeast(1) * TOKENS_PER_REPLY + TOKENS_JSON_SHELL)
 
 /** 模型没按契约回时的补正指令（只在第二次尝试时追加到 system 末尾）。 */
 private const val JSON_NUDGE = """【补正】你上一次的输出不是合法 JSON，或者被截断了。

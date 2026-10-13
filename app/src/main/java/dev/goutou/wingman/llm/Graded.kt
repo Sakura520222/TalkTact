@@ -76,6 +76,13 @@ object Graded {
         roleContext: String?,
         /** 等慢的那一路多久（见 [gradedWaitMs]） */
         waitMs: Long = 60_000L,
+        /**
+         * 写回复那一路要给几条、什么风格（用户在设置页选的）。
+         *
+         * 默认取**默认规格**：调用方（Overlay）通常会显式传当前配置，
+         * 但留个默认值是为了让老调用点和单测不必都改 —— 而默认规格正好是老行为。
+         */
+        plan: ReplyPlan = ReplyPlan.default(),
     ): GradedOutcome {
         val start = System.currentTimeMillis()
         var riskSug: Suggestion? = null
@@ -101,7 +108,7 @@ object Graded {
         riskThread.start()
 
         try {
-            val r = replyClient.analyzeWith(gradedReplyPrompt(skillPrompt), msgs, roleContext)
+            val r = replyClient.analyzeWith(gradedReplyPrompt(skillPrompt, plan), msgs, roleContext)
             replySug = r.suggestion
             replyTokens = r.totalTokens
         } catch (t: Throwable) {
@@ -133,7 +140,7 @@ object Graded {
                 }
             } else {
                 try {
-                    val r = replyClient.analyzeWith(gradedReplyPrompt(skillPrompt), msgs, roleContext)
+                    val r = replyClient.analyzeWith(gradedReplyPrompt(skillPrompt, plan), msgs, roleContext)
                     replySug = r.suggestion
                     replyTokens += r.totalTokens
                     replyErr = null

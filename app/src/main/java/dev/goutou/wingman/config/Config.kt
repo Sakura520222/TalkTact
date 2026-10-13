@@ -3,6 +3,17 @@ package dev.goutou.wingman.config
 import android.content.Context
 import android.content.SharedPreferences
 import dev.goutou.wingman.llm.DEFAULT_PROMPT
+import dev.goutou.wingman.llm.DEFAULT_REPLY_COUNT
+import dev.goutou.wingman.llm.MAX_REPLIES
+import dev.goutou.wingman.llm.MIN_REPLIES
+import dev.goutou.wingman.llm.REPLY_STYLES
+import dev.goutou.wingman.llm.ReplyPlan
+import dev.goutou.wingman.llm.ReplyStyle
+import dev.goutou.wingman.llm.applyReplyPlan
+import dev.goutou.wingman.llm.decodeCustomStyles
+import dev.goutou.wingman.llm.encodeCustomStyles
+import dev.goutou.wingman.llm.plannedReplyCount
+import dev.goutou.wingman.llm.replyPlanOf
 
 /**
  * 装到系统里的包名（= build.gradle 里的 applicationId）。
@@ -83,6 +94,33 @@ object Keys {
     const val GLASS_QUALITY = "glass_quality"
     /** 严格 JSON 输出：请求里带 response_format=json_object（只作用于「生成候选」） */
     const val JSON_MODE = "json_mode"
+    /**
+     * 要几条候选回复（1..MAX_REPLIES，见 llm/ReplyPlan.kt）。默认 3。
+     *
+     * 现在**由「勾了几种风格」派生**（见 [ConfigData.replyPlan]），设置页上已经没有这一项；
+     * 仍然落盘，是为了注入进程和老备份能读到同一个数。
+     */
+    const val REPLY_COUNT = "reply_count"
+    /**
+     * 用户**显式勾选**的回复风格，**一行一个 [ReplyStyle.id]**（见 llm/ReplyPlan.kt 的 REPLY_STYLES）。
+     *
+     * 为什么是「一行一个的字符串」而不是 `putStringSet`：**Set 会把顺序丢掉**，
+     * 而这里的顺序决定「第 1 条走哪个风格、第 2 条走哪个」—— 丢顺序之后用户每次重启
+     * 看到的第 1/2/3 条风格都在变，勾了三四个风格时尤其明显。
+     */
+    const val REPLY_STYLES = "reply_styles_order"
+    /**
+     * 同一份选择的 `putStringSet` 副本，**只为兼容**：老配置、以及已经在跑的注入侧读的是这个键。
+     * 读取时优先用 [REPLY_STYLES]（保序），它不在才回落到这里。
+     */
+    const val REPLY_STYLES_SET = "reply_styles"
+    /**
+     * 用户自己加的风格。
+     *
+     * 存的是**一行一条的编码文本**（`名称\u0001说明`，见 `llm/encodeCustomStyles`），
+     * 不用 `putStringSet` —— Set 会把顺序丢掉，而顺序就是界面上显示的顺序。
+     */
+    const val REPLY_CUSTOM_STYLES = "reply_custom_styles"
     /** 「接口自检」量到的两路延迟（ms）；设置页的公告栏与「两路对齐等待」都用它 */
     const val PROBE_REPLY_MS = "probe_reply_ms"
     const val PROBE_RISK_MS = "probe_risk_ms"
@@ -213,6 +251,35 @@ data class ConfigData(
      */
     val jsonMode: Boolean = false,
     /**
+     * 要几条候选回复（1..[dev.goutou.wingman.llm.MAX_REPLIES]，默认 3）。
+     *
+     * ⚠️ **设置页上已经没有这一项了**：它由「勾了几种风格」派生
+     *（见 [ConfigData.replyPlan] 与 `llm/plannedReplyCount`）。留在这里、也照常落盘，
+     * 只是为了**注入进程和老备份**能读到同一个数 —— 别再把它当成用户可调的设置。
+     */
+    val replyCount: Int = 3,
+    /**
+     * 用户**显式勾选**的回复风格（存的是 [dev.goutou.wingman.llm.ReplyStyle.id]），**保序**。
+     *
+     * 「显式勾选」是刻意的：这张表**不含**系统为凑够条数而自动补齐的风格。
+     * 界面上亮着的药丸就看它 —— 拿「补齐后的生效表」当选中态的话，点一个被补齐进来的风格
+     * 会变成「减掉 → 又被补齐回来」= 点了没反应（见 `llm/toggledStyleIds`）。
+     *
+     * 是 `List` 而不是 `Set`：顺序决定「第 1 条走哪个风格」，Set 存不住。
+     *
+     * 默认空 = 还没配过 → 用 [dev.goutou.wingman.llm.DEFAULT_STYLE_IDS]（稳妥 / 幽默 / 推进），
+     * 和三个内置 skill 提示词里原本写死的三样一致 —— 老用户升级后行为不变。
+     */
+    val replyStyleIds: List<String> = emptyList(),
+    /**
+     * 用户**自己加**的回复风格（设置页里手输「名称 + 说明」）。
+     *
+     * 顺序 = 界面上显示的顺序。它们和内置 8 种一样参与「勾选 / 补齐 / 写进提示词」，
+     * 唯一区别是：**补齐条数时只用内置的**，不会拿自定义的来凑数
+     *（见 llm/ReplyPlan.kt 的 [dev.goutou.wingman.llm.ReplyPlan.of]）。
+     */
+    val replyCustomStyles: List<dev.goutou.wingman.llm.ReplyStyle> = emptyList(),
+    /**
      * 「接口自检」量到的两路延迟（毫秒；0 = 没测过）。
      * 和 [selfStyleEnabled] 一样是**只读**字段：由 [ConfigStore.saveProbeMs] 单独写，save() 不碰。
      */
@@ -309,6 +376,11 @@ data class ConfigData(
             model2 = p.getString(Keys.MODEL2, "").orEmpty(),
             glassQuality = p.getString(Keys.GLASS_QUALITY, GLASS_QUALITY_AUTO).orEmpty().ifBlank { GLASS_QUALITY_AUTO },
             jsonMode = p.getBoolean(Keys.JSON_MODE, false),
+            replyCount = p.getInt(Keys.REPLY_COUNT, DEFAULT_REPLY_COUNT)
+                .coerceIn(MIN_REPLIES, MAX_REPLIES),
+            replyStyleIds = readReplyStyleIds(p),
+            // 编码文本 → 自定义风格列表。坏行会被 decode 自己跳过，这里不用再兜。
+            replyCustomStyles = decodeCustomStyles(p.getString(Keys.REPLY_CUSTOM_STYLES, null).orEmpty()),
             probeReplyMs = p.getLong(Keys.PROBE_REPLY_MS, 0L).coerceAtLeast(0L),
             probeRiskMs = p.getLong(Keys.PROBE_RISK_MS, 0L).coerceAtLeast(0L),
             proxyEnabled = p.getBoolean(Keys.PROXY_ON, false),
@@ -326,6 +398,40 @@ data class ConfigData(
 
     }
 }
+
+/**
+ * 读「显式勾选的风格」，**保序**。
+ *
+ * 优先读 [Keys.REPLY_STYLES]（一行一个 id 的新格式）；读不到（老配置还没被写过）才回落到
+ * [Keys.REPLY_STYLES_SET] 那份 Set —— 那份的顺序本来就是随机的，但总比「读不出来、
+ * 勾选全丢」好。两个键都会在写入时一起更新，所以回落只发生在升级后的第一次读取。
+ */
+private fun readReplyStyleIds(p: SharedPreferences): List<String> {
+    val ordered = p.getString(Keys.REPLY_STYLES, null)
+    val raw = if (!ordered.isNullOrBlank()) {
+        ordered.split('\n')
+    } else {
+        p.getStringSet(Keys.REPLY_STYLES_SET, emptySet()).orEmpty().toList()
+    }
+    return raw.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+}
+
+/**
+ * 这份配置对应的回复规格（内置 8 种 + 用户自定义的）。
+ *
+ * 抽成扩展是为了让调用方只写 `cfg.replyPlan` —— 一共三处要用（[ConfigStore.saveReplyPlan]
+ * 重拼提示词、`llm/LlmClient` 决定要几条、`wechat/Overlay` 传给分级那两路），
+ * 每处都自己写一遍 `ReplyPlan.of(replyCount, replyStyleIds, replyCustomStyles)`
+ * 的话，**漏掉最后那个参数**就是「自定义风格在某个路径上不生效」—— 而这种漏法是静默的。
+ */
+val ConfigData.replyPlan: ReplyPlan
+    get() = replyPlanOf(
+        // 条数**从勾选里派生**（勾几种就写几条）；一种都没勾才回落到存着的 [replyCount]。
+        // 这里是全模块唯一算条数的地方 —— 别的调用点都走这个扩展，别再各算各的。
+        plannedReplyCount(replyStyleIds, replyCount),
+        replyStyleIds,
+        replyCustomStyles,
+    )
 
 /**
  * 配置仓库。
@@ -375,6 +481,12 @@ class ConfigStore(context: Context) {
             .putString(Keys.MODEL2, d.model2.trim())
             .putString(Keys.GLASS_QUALITY, d.glassQuality)
             .putBoolean(Keys.JSON_MODE, d.jsonMode)
+            .putInt(Keys.REPLY_COUNT, d.replyCount.coerceIn(MIN_REPLIES, MAX_REPLIES))
+            // 两个键一起写：新键保序（读取以它为准），旧键留着给已经装机的注入侧/老备份兜底
+            .putString(Keys.REPLY_STYLES, d.replyStyleIds.joinToString("\n"))
+            .putStringSet(Keys.REPLY_STYLES_SET, d.replyStyleIds.toHashSet())
+            // 自定义风格连同顺序一起存（编码成一行一条），见 Keys.REPLY_CUSTOM_STYLES 的说明
+            .putString(Keys.REPLY_CUSTOM_STYLES, encodeCustomStyles(d.replyCustomStyles))
             .putBoolean(Keys.PROXY_ON, d.proxyEnabled)
             .putInt(Keys.PROXY_PORT, d.proxyPort.coerceIn(1024, 65535))
             .putBoolean(Keys.WHITELIST_ON, d.whitelistEnabled)
@@ -493,6 +605,85 @@ class ConfigStore(context: Context) {
      */
     fun saveGraded(graded: Boolean) {
         sp.edit().putBoolean(Keys.GRADED, graded).apply()
+    }
+
+    /**
+     * 只改「候选条数 + 风格」这两项 + **按新规格重拼提示词快照**，立刻落盘。
+     *
+     * 重拼这一下是必须的，不是顺手做的：[Keys.PROMPT] 存的是**完整提示词**，
+     * 「提示词」页直接把这份快照显示出来。而规格段和输出契约是拼在正文末尾的两段 ——
+     * 不重拼的话，用户在设置里把条数从 3 改成 5，实际发出去的确实变了（调用时还会再拼一次，
+     * 见 `llm/applyReplyPlan`），但「提示词」页看上去一个字没动。
+     *
+     * 这正是「改了没反应」最难查的一种：设置页存的是新值、行为也变了，
+     * 唯一对不上的是给人看的那份文本，比真没生效还费时间。
+     *
+     * 用 [dev.goutou.wingman.llm.applyReplyPlan] 重拼，而不是直接拿内置 core 覆盖：
+     * 「提示词」页是自由编辑的，用户可能自己写过正文，覆盖掉就等于删他的东西。
+     * 它只换掉规格段和契约两段，正文原样保留。
+     */
+    fun saveReplyPlan(styleIds: List<String>) {
+        // 顺手把**已经认不出的 id**（自定义风格被删掉之后的残留）剔掉：留着它会白占一个位置，
+        // 而界面上根本没有对应的药丸可以点掉它 —— 症状是「勾了 3 个，只亮 2 个」。
+        //
+        // 顺序**必须留着**（所以是 List 不是 Set）：它决定「第 1 条走哪个风格」，
+        // 也决定超过上限时留下哪几个。以前用 Set 时后一件事取决于遍历顺序，
+        // 用户看到的是「点了个新的，掉的却是别的那个」。
+        val known = (REPLY_STYLES + customStyles()).map { it.id }.toSet()
+        val ids = styleIds.map { it.trim() }.filter { it.isNotBlank() && it in known }
+            .distinct().take(MAX_REPLIES)
+        // **条数 = 勾选的个数**（见 llm/plannedReplyCount）。存下来只为注入侧 / 老备份能读到同一个数，
+        // 事实来源始终是这份勾选本身 —— 所以这个方法不再收「条数」这个入参了。
+        val n = plannedReplyCount(ids)
+        val rebuilt = applyReplyPlan(
+            sp.getString(Keys.PROMPT, null).orEmpty().ifBlank { DEFAULT_PROMPT },
+            // 自定义风格必须一起带上：不带的话 `custom:xxx` 这种 id 在内置清单里认不出来会被丢掉，
+            // 用户明明选着自定义风格，重拼出来的提示词里却没有它 ——「加了没用」的老剧本。
+            replyPlanOf(n, ids, customStyles()),
+        )
+        sp.edit()
+            .putInt(Keys.REPLY_COUNT, n)
+            .putString(Keys.REPLY_STYLES, ids.joinToString("\n"))
+            .putStringSet(Keys.REPLY_STYLES_SET, ids.toHashSet())
+            .putString(Keys.PROMPT, rebuilt)
+            .apply()
+    }
+
+    /**
+     * 当前存着的自定义风格。
+     *
+     * 单独抽出来是因为它有两个用途：① 设置页显示；② [saveReplyPlan] / [saveCustomStyles]
+     * 重拼提示词时要把 id 认出来。两处都从偏好读，免得内存里那份和落盘的那份不一致。
+     */
+    fun customStyles(): List<ReplyStyle> =
+        decodeCustomStyles(sp.getString(Keys.REPLY_CUSTOM_STYLES, null).orEmpty())
+
+    /**
+     * 加 / 删一个自定义风格，**顺手把提示词重拼一遍**，立刻落盘。
+     *
+     * 为什么要一起重拼：[Keys.PROMPT] 存的是快照，「提示词」页直接显示它。
+     * 只写风格列表不重拼的话，新加的风格在**实际调用**时会被算进去（调用时会按当前规格再拼一次），
+     * 但页面上那份文本里没有 —— 又是一处「设置是新的、给人看的文本是旧的」。
+     * 这个坑上一版刚踩过（改了条数提示词不跟着变），不重复踩。
+     */
+    fun saveCustomStyles(styles: List<ReplyStyle>) {
+        val keep = styles.distinctBy { it.id }
+        val ids = readReplyStyleIds(sp)
+        val rebuilt = applyReplyPlan(
+            sp.getString(Keys.PROMPT, null).orEmpty().ifBlank { DEFAULT_PROMPT },
+            replyPlanOf(
+                // 条数照旧**从勾选派生**（和 [ConfigData.replyPlan] 同一套算法）。
+                // 这里要是按存着的 replyCount 算，两处算法不一致就会留下
+                //「设置页显示一个数、提示词快照另一个数」那种互相打脸的快照。
+                plannedReplyCount(ids, sp.getInt(Keys.REPLY_COUNT, DEFAULT_REPLY_COUNT)),
+                ids,
+                keep,
+            ),
+        )
+        sp.edit()
+            .putString(Keys.REPLY_CUSTOM_STYLES, encodeCustomStyles(keep))
+            .putString(Keys.PROMPT, rebuilt)
+            .apply()
     }
 
     /**

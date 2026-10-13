@@ -2,6 +2,7 @@ package dev.goutou.wingman
 
 import dev.goutou.wingman.llm.DEFAULT_PROMPT
 import dev.goutou.wingman.llm.Reply
+import dev.goutou.wingman.llm.ReplyPlan
 import dev.goutou.wingman.llm.Suggestion
 import dev.goutou.wingman.llm.gradedReplyPrompt
 import dev.goutou.wingman.llm.gradedWaitMs
@@ -84,7 +85,7 @@ class GradedTest {
     @Test
     fun `两路各带自己的契约`() {
         val riskPrompt = gradedRiskPrompt(DEFAULT_PROMPT)
-        val replyPrompt = gradedReplyPrompt(DEFAULT_PROMPT)
+        val replyPrompt = gradedReplyPrompt(DEFAULT_PROMPT, ReplyPlan.default())
         assertTrue(riskPrompt.contains("\"risk\""))
         assertTrue(replyPrompt.contains("\"replies\""))
         assertTrue(replyPrompt.contains("\"best\""))

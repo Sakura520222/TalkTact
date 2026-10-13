@@ -99,7 +99,18 @@ import dev.goutou.wingman.config.GLASS_QUALITY_HIGH
 import dev.goutou.wingman.config.GLASS_QUALITY_LOW
 import dev.goutou.wingman.config.Role
 import dev.goutou.wingman.config.Roles
+import dev.goutou.wingman.config.replyPlan
 import dev.goutou.wingman.llm.BUILT_IN_SKILLS
+import dev.goutou.wingman.llm.ReplyStyle
+import dev.goutou.wingman.llm.REPLY_STYLES
+import dev.goutou.wingman.llm.DEFAULT_STYLE_IDS
+import dev.goutou.wingman.llm.toggledStyleIds
+import dev.goutou.wingman.llm.MAX_CUSTOM_LABEL_LEN
+import dev.goutou.wingman.llm.MAX_CUSTOM_STYLES
+import dev.goutou.wingman.llm.MAX_REPLIES
+import dev.goutou.wingman.llm.customStyle
+import dev.goutou.wingman.llm.applyReplyPlan
+import dev.goutou.wingman.llm.coreOf
 import dev.goutou.wingman.llm.Geo
 import dev.goutou.wingman.llm.LlmClient
 import dev.goutou.wingman.llm.LlmException
@@ -751,6 +762,7 @@ fun TrialScreen(store: ConfigStore, glassAlpha: Float) {
                                         msgs = msgs,
                                         roleContext = null,
                                         waitMs = gradedWaitMs(conf.probeReplyMs, conf.probeRiskMs),
+                                        plan = conf.replyPlan,
                                     )
                                 }
                                 suggestion = out.suggestion
@@ -1043,8 +1055,11 @@ fun MentorScreen(store: ConfigStore, glassAlpha: Float, onSaved: () -> Unit) {
                     }
                     Button(
                         onClick = {
-                            // 内容跟哪个内置 skill 逐字一样，就还算那个 skill；动过了才算「自定义」
-                            val known = BUILT_IN_SKILLS.firstOrNull { it.prompt == text }?.id
+                            // 内容跟哪个内置 skill 逐字一样，就还算那个 skill；动过了才算「自定义」。
+                            // 比的是**正文**（去掉规格段和契约），不是整段逐字比：
+                            // 用户改过条数/风格之后，尾部两段会跟着重拼，
+                            // 整段比对会把内置 skill 误判成「自定义」，再切一次就把 skillId 冲掉了。
+                            val known = BUILT_IN_SKILLS.firstOrNull { coreOf(it.prompt) == coreOf(text) }?.id
                             persist(text, known ?: "custom", unlimited = true)
                         },
                         modifier = Modifier.fillMaxWidth().height(48.dp),
@@ -1065,7 +1080,8 @@ fun MentorScreen(store: ConfigStore, glassAlpha: Float, onSaved: () -> Unit) {
                 Text("点一下直接启用（会替换当前提示词）", fontSize = 13.sp, color = palette.sub)
                 Spacer(Modifier.height(4.dp))
                 BUILT_IN_SKILLS.forEach { skill ->
-                    val selected = cfg.skillId == skill.id && cfg.prompt == skill.prompt
+                    // 同上：比正文，不比整段 —— 否则改过条数后当前 skill 会被显示成「没选中」。
+                    val selected = cfg.skillId == skill.id && coreOf(cfg.prompt) == coreOf(skill.prompt)
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -1073,7 +1089,23 @@ fun MentorScreen(store: ConfigStore, glassAlpha: Float, onSaved: () -> Unit) {
                             .clip(RoundedCornerShape(RadiusR2))
                             .background(palette.glassTint.copy(alpha = if (selected) 0.18f else 0.09f))
                             .clickable {
-                                store.save(store.load().copy(prompt = skill.prompt, skillId = skill.id, maxTokens = 0))
+                                // 内置 skill 存的是「默认三条」那份快照（[BUILT_IN_SKILLS] 是常量，
+                                // 不该因为用户改过设置就被改写）。直接存它会把用户选的条数和风格丢掉 ——
+                                // 所以按**当前**规格重拼一份再存，正文照样是内置 skill 的。
+                                val cur = store.load()
+                                store.save(
+                                    cur.copy(
+                                        prompt = applyReplyPlan(
+                                            skill.prompt,
+                                            // 用配置上的 replyPlan：它会带上用户自定义的风格。
+                                            // 这里漏掉那个参数的话，切到内置 skill 时自定义风格会
+                                            // 从提示词快照里消失（下一次调用才又被拼回来，很怪）。
+                                            cur.replyPlan,
+                                        ),
+                                        skillId = skill.id,
+                                        maxTokens = 0,
+                                    )
+                                )
                                 cfg = store.load()
                                 text = cfg.prompt
                                 tweak = false
@@ -1536,7 +1568,41 @@ fun AdvancedScreen(
         onSaved()
     }
 
-    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+    /**
+ * 「勾了哪些风格」也**立刻落盘**（原因见 `ConfigStore.saveReplyPlan`）—— 顺手把条数一起更新，
+ * 因为**条数就是从这份勾选派生的**（勾几种就写几条，见 `llm/plannedReplyCount`）。
+ *
+ * 撇开草稿直接落盘是因为它是纯选择型的：用户点一下药丸，期待的就是下次调用按新规格来。
+ * 让它只改草稿、混在页底那个「保存」后面，一定会出现「我明明勾了怎么还是旧的」。
+ * 同步回草稿时**只动这两个字段**，别把这一页还在编辑的接口地址一起定死。
+ */
+fun saveReplyPlan(styleIds: List<String>) {
+    store.saveReplyPlan(styleIds)
+    val fresh = store.load()
+    d = d.copy(replyCount = fresh.replyCount, replyStyleIds = fresh.replyStyleIds)
+    persisted = fresh
+    onSaved()
+}
+
+/**
+ * 「自定义风格」加/删也**立刻落盘**，顺带把提示词快照重拼（见 `ConfigStore.saveCustomStyles`）。
+ *
+ * 这里多同步一个 [ConfigData.replyStyleIds]：加了风格顺手就把它选上（见下面卡片的说明），
+ * 只回写风格列表的话，界面上「已选中」的那颗药丸会和配置里存的对不上。
+ */
+fun saveCustomStyles(styles: List<ReplyStyle>, styleIds: List<String>) {
+    store.saveCustomStyles(styles)
+    store.saveReplyPlan(styleIds)
+    val fresh = store.load()
+    d = d.copy(
+        replyCustomStyles = fresh.replyCustomStyles,
+        replyStyleIds = fresh.replyStyleIds,
+    )
+    persisted = fresh
+    onSaved()
+}
+
+val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
             backupNote = try {
                 context.contentResolver.openOutputStream(uri)?.use { out ->
@@ -2144,6 +2210,180 @@ fun AdvancedScreen(
                     color = palette.sub,
                 )
             }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        GlassCard(d.glassAlpha) {
+            Text("回复风格（可多选）", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+            Spacer(Modifier.height(8.dp))
+
+            val plan = d.replyPlan
+            // 界面上「亮着」的 = 用户**显式勾选**的那几个，**不是** [plan.styles]。
+            //
+            // [plan.styles] 里掺了「为凑够条数自动补齐」的风格，拿它当选中态一定会出问题：
+            // 点一个「被补齐进来、界面上正亮着」的风格 → 从集合里减掉 → 下一轮又被补齐回来
+            // → 表现是**点了没反应**（多勾几个时必然踩到）。补齐只留在提示词那一侧（见 ReplyPlan.of），
+            // 界面永远只亮真正勾了的那几个。
+            //
+            // 空 = 还没配过 → 显示默认三样（那正是实际会用的那三种，见 DEFAULT_STYLE_IDS）。
+            val explicitIds = d.replyStyleIds.ifEmpty { DEFAULT_STYLE_IDS }
+            // 现存风格 id（内置 + 自定义）：勾选集里可能残留「加过又删掉」的自定义风格，
+            // 不清掉它会白占一个位置（条数就那么几个），而界面上又找不到它。
+            val knownIds = REPLY_STYLES.map { it.id }.toSet() + d.replyCustomStyles.map { it.id }
+            val chosenIds = explicitIds.filter { it in knownIds }.toSet()
+
+            // 这里**只讲「可以多选」**：条数没有单独的选项了，勾几种就写几条
+            //（见 llm/plannedReplyCount）。顺序那个细节挪到卡片底部 —— 放在这儿要换两行。
+            Text(
+                "可多选（最多 $MAX_REPLIES 种）：勾几种就写几条",
+                fontSize = 13.sp,
+                color = palette.sub,
+            )
+            Spacer(Modifier.height(6.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                REPLY_STYLES.chunked(4).forEach { rowStyles ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        rowStyles.forEach { st ->
+                            GlassPill(
+                                st.label,
+                                st.id in chosenIds,
+                                Modifier.weight(1f),
+                            ) {
+                                // 勾选规则全在 `llm/toggledStyleIds` 里（新点的一定留下、位置不够让末尾、
+                                // 点掉最后一个 = 保持现状），而且只认**显式勾选**那一份。
+                                // 这里**不能**自己算 `chosenIds ± st.id`：那会把自动补齐的风格也当成
+                                // 用户勾过的存下去，于是点一个亮着的风格会「减掉又被补回来」，像没反应。
+                                saveReplyPlan(toggledStyleIds(explicitIds, st.id, MAX_REPLIES, knownIds))
+                            }
+                        }
+                        // 一行放不满时用空 Spacer 补齐权重，避免最后几个被拉得特别宽
+                        repeat(4 - rowStyles.size) { Spacer(Modifier.weight(1f)) }
+                    }
+                }
+            }
+
+            // ── 自定义风格：自己敲一个风格名加进来 ──────────────────────────────────
+            // 加进来的风格和内置 8 种**完全同等**（能勾选、能写进提示词、能参与补齐），
+            // 不是「只给候选贴个标签」—— 所以它必须真的被算进 ReplyPlan，见 llm/ReplyPlan.kt。
+            Spacer(Modifier.height(10.dp))
+            var newStyleName by remember { mutableStateOf("") }
+            var newStyleHint by remember { mutableStateOf("") }
+            var styleNote by remember { mutableStateOf("") }
+
+            Text("自定义风格（加完直接选中，和上面同等）", fontSize = 13.sp, color = palette.sub)
+            Spacer(Modifier.height(4.dp))
+
+            if (d.replyCustomStyles.isNotEmpty()) {
+                // 已经加过的清单：行距压到 2dp（它们是列表项，不必每个都占满一行高度）
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    d.replyCustomStyles.forEach { st ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            GlassPill(st.displayLabel, st.id in chosenIds, Modifier.weight(1f)) {
+                                saveReplyPlan(toggledStyleIds(explicitIds, st.id, MAX_REPLIES, knownIds))
+                            }
+                            TextButton(
+                                onClick = {
+                                    // 删掉它，连同它的勾选一起清 —— 只从列表里删、把 id 留在
+                                    // 勾选集里的话，它会一直占着一个位置（条数就那么几个），
+                                    // 而界面上又找不到它，表现是「条数明明给了 3 条却只出来 2 条」。
+                                    val rest = d.replyCustomStyles.filter { it.id != st.id }
+                                    saveCustomStyles(rest, explicitIds.filter { it != st.id })
+                                },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                            ) { Text("删除", fontSize = 12.sp, color = palette.bad) }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+
+            // 名字输入和按钮挤在**同一行**：以前是「两个输入框 + 一个整行按钮」三行，
+            // 而这里平时只用得上第一格 —— 那块高度全被白占掉了。
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    colors = glassFieldColors(),
+                    shape = RoundedCornerShape(RadiusR2),
+                    value = newStyleName,
+                    // 先在输入处就按字数上限拦住，免得粘一大段进来把药丸撑破
+                    onValueChange = { if (it.length <= MAX_CUSTOM_LABEL_LEN) newStyleName = it },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    label = { Text("风格名（比如：撒娇）", fontSize = 12.sp) },
+                )
+                Spacer(Modifier.width(6.dp))
+                Button(
+                    onClick = {
+                        val st = customStyle(newStyleName, newStyleHint)
+                        styleNote = when {
+                            st == null -> "风格名不能为空"
+                            // 提示语用 displayLabel（短的那个）：全名可以有 16 个字，
+                            // 塞进这行提示里会把它撑成两行。
+                            d.replyCustomStyles.any { it.id == st.id } -> "「${st.displayLabel}」已经加过了"
+                            d.replyCustomStyles.size >= MAX_CUSTOM_STYLES -> "最多加 $MAX_CUSTOM_STYLES 个"
+                            else -> {
+                                // 加完**直接选中，并且排在勾选集最前**：条数只有 n 个位置，
+                                // 加了不选中、或者被末尾挤掉，用户看到的就是「加了没用」。
+                                val list = d.replyCustomStyles + st
+                                val next = (listOf(st.id) + explicitIds).distinct()
+                                saveCustomStyles(list, next.take(MAX_REPLIES))
+                                newStyleName = ""
+                                newStyleHint = ""
+                                "已加「${st.displayLabel}」并选中"
+                            }
+                        }
+                    },
+                    shape = RoundedCornerShape(RadiusR2),
+                    contentPadding = PaddingValues(horizontal = 16.dp),
+                ) { Text("添加风格") }
+            }
+            Spacer(Modifier.height(4.dp))
+            OutlinedTextField(
+                colors = glassFieldColors(),
+                shape = RoundedCornerShape(RadiusR2),
+                value = newStyleHint,
+                onValueChange = { newStyleHint = it },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                label = { Text("说明（可选，给模型看：比如用撒娇的语气带点抱怨）", fontSize = 12.sp) },
+            )
+            if (styleNote.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                Text(styleNote, fontSize = 13.sp, color = palette.sub)
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            HintText(
+                "当前会写：${plan.summary} —— 勾选顺序就是第 1/2/3 条的顺序。" +
+                    "这段会写进提示词，让模型按你选的类型各写一条 —— " +
+                    "所以「风格」不是给候选贴标签，是真的在要求模型换着写。",
+                fontSize = 13.sp,
+                color = palette.sub,
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "点一下就生效（立刻落盘，不用等页底那个「保存」）。勾得越多每条会被摊薄、越容易" +
+                    "雷同，模型输出也更容易顶到长度上限（本模块会按条数把输出预算抬到够用）；" +
+                    "2~6 条通常最实用。",
+                fontSize = 13.sp,
+                color = palette.ok,
+            )
+            Spacer(Modifier.height(6.dp))
+            // 用户要求「提醒用户重启微信就好」，随后又把措辞改成**强行停止**：
+            // 从最近任务里划掉往往杀不掉微信进程，只有系统的「强行停止」才真的把它按下去。
+            // 卡片上只留这一句行动指引，不解释原理（原理写在 CHANGELOG 与项目笔记里）。
+            Text(
+                "⚠ 选完记得强行停止微信，再重新打开",
+                fontSize = 13.sp,
+                color = palette.warn,
+            )
         }
 
         GroupTitle("识别")
