@@ -2215,7 +2215,7 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
         Spacer(Modifier.height(10.dp))
 
         GlassCard(d.glassAlpha) {
-            Text("每次给几条、什么风格", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+            Text("回复风格（可多选）", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
             Spacer(Modifier.height(8.dp))
 
             val plan = d.replyPlan
@@ -2233,11 +2233,10 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
             val knownIds = REPLY_STYLES.map { it.id }.toSet() + d.replyCustomStyles.map { it.id }
             val chosenIds = explicitIds.filter { it in knownIds }.toSet()
 
-            // 「条数」那一行已经删掉了：它和下面这个多选说的是同一件事，同时存在只会互相打架
-            //（勾了 5 种、条数却写着 2，听谁的？）。现在**勾几种就是几条**，
-            // 见 llm/plannedReplyCount —— 这里是它唯一的入口。
+            // 这里**只讲「可以多选」**：条数没有单独的选项了，勾几种就写几条
+            //（见 llm/plannedReplyCount）。顺序那个细节挪到卡片底部 —— 放在这儿要换两行。
             Text(
-                "风格（可多选，最多 $MAX_REPLIES 种 —— 勾几种就写几条，勾选顺序就是第 1/2/3 条的顺序）",
+                "可多选（最多 $MAX_REPLIES 种）：勾几种就写几条",
                 fontSize = 13.sp,
                 color = palette.sub,
             )
@@ -2362,7 +2361,8 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
             Spacer(Modifier.height(10.dp))
 
             HintText(
-                "当前：${plan.summary}。这段会写进提示词，让模型按你选的类型各写一条 —— " +
+                "当前会写：${plan.summary} —— 勾选顺序就是第 1/2/3 条的顺序。" +
+                    "这段会写进提示词，让模型按你选的类型各写一条 —— " +
                     "所以「风格」不是给候选贴标签，是真的在要求模型换着写。",
                 fontSize = 13.sp,
                 color = palette.sub,
@@ -2374,6 +2374,15 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
                     "2~6 条通常最实用。",
                 fontSize = 13.sp,
                 color = palette.ok,
+            )
+            Spacer(Modifier.height(6.dp))
+            // 用户要求「提醒用户重启微信就好」，随后又把措辞改成**强行停止**：
+            // 从最近任务里划掉往往杀不掉微信进程，只有系统的「强行停止」才真的把它按下去。
+            // 卡片上只留这一句行动指引，不解释原理（原理写在 CHANGELOG 与项目笔记里）。
+            Text(
+                "⚠ 选完记得强行停止微信，再重新打开",
+                fontSize = 13.sp,
+                color = palette.warn,
             )
         }
 

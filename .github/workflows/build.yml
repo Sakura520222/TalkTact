@@ -186,12 +186,7 @@ jobs:
           name: screenshots
           path: app/build/screenshots/
           if-no-files-found: ignore
-      # 产物名里带上**提交号**。
-      # ⚠️ 只靠版本号已经认不出包了：版本号被固定在 0.8.12(39)，各分支、各次构建出的
-      # 包**全都叫同一个名字**（下载到的是哪一次构建完全看不出来 —— 排障时为此白绕过好几轮：
-      # 真机上跑的是修好前的包，现象和没改**一模一样**，谁也说不清手上是哪一份）。
-      # 现在产物叫 TalkTact-<versionName>(<versionCode>)-<提交号>-debug.apk，
-      # 下载完看一眼提交号就知道是哪次构建、哪条分支出的。
+      # 产物名带上提交号：下载完看一眼就知道是哪次构建、哪条分支出的。
       - name: rename apk with version and sha
         run: |
           set -e

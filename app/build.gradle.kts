@@ -11,15 +11,6 @@ android {
         applicationId = "io.github.shibry88_netizen.talktact"
         minSdk = 31  // Android 12+：液态玻璃的真实背景模糊走 RenderEffect
         targetSdk = 34
-        // 版本号**固定 0.8.12(39)**，不随提交变动（用户要求：所有提交非明确说明不要改版本号）。
-        //
-        // ⚠️ 由此带来两个后果，出包 / 装包前必须知道：
-        //  1. 版本号**不再能区分构建** —— 各分支、各次构建出的包版本号全都一样。
-        //     所以 CI 会把**提交号**写进产物名：`TalkTact-0.8.12(39)-<提交号>-debug.apk`
-        //     （见 .github/workflows/build.yml 的 rename 那一步）。
-        //     认包看**提交号**，不要再靠版本号。
-        //  2. 历史上曾经推到 0.8.20(47)；**装过那些包的手机会拒绝安装这份**（版本回退），
-        //     报 `INSTALL_FAILED_VERSION_DOWNGRADE`，要先卸载再装。
         versionCode = 39
         versionName = "0.8.12"
 

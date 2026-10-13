@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.sp
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.goutou.wingman.config.ConfigStore
+import dev.goutou.wingman.llm.MAX_REPLIES
 import dev.goutou.wingman.llm.REPLY_STYLES
 import dev.goutou.wingman.config.Keys
 import dev.goutou.wingman.config.PREF_NAME
@@ -193,7 +194,7 @@ class ScreenRenderTest {
     }
 
     /**
-     * 「条数 / 风格」那张新卡的入口断言。
+     * 「回复风格（可多选）」那张卡的入口断言。
      *
      * 可以断言到后面几个分组（「图片文字识别（OCR）」等）也在，是因为这一页用的是
      * `verticalScroll` 的 Column 而不是 LazyColumn —— 所有子节点都会进语义树，
@@ -203,9 +204,15 @@ class ScreenRenderTest {
      * 一旦以后调整成别的列数/顺序，逐个断言就会毫无理由地红 —— 而卡片在不在才是要紧的。
      */
     @Test
-    fun `高级设置里有条数与风格的选择`() {
+    fun `高级设置里有风格多选（没有单独的条数选项）`() {
         page { AdvancedScreen(store, store.load(), {}, {}, {}, {}) }
-        rule.onNodeWithText("每次给几条、什么风格").assertExists()
+        rule.onNodeWithText("回复风格（可多选）").assertExists()
+        // 「可以多选」这句话必须在，否则用户不知道能多勾
+        rule.onNodeWithText("可多选（最多 $MAX_REPLIES 种）：勾几种就写几条").assertExists()
+        // 旧的「条数」入口不能再出现 —— 出现就说明那排 1~6 的药丸又回来了
+        rule.onNodeWithText("条数").assertDoesNotExist()
+        // 用户要求「选完风格要提示重启微信」——这条提示丢了就等于没告诉
+        rule.onNodeWithText("强行停止微信", substring = true).assertExists()
     }
 
     /**
