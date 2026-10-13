@@ -3,6 +3,7 @@ package dev.goutou.wingman.config
 import android.content.Context
 import android.content.SharedPreferences
 import dev.goutou.wingman.llm.DEFAULT_PROMPT
+import dev.goutou.wingman.llm.DEFAULT_REPLY_COUNT
 import dev.goutou.wingman.llm.MAX_REPLIES
 import dev.goutou.wingman.llm.MIN_REPLIES
 import dev.goutou.wingman.llm.REPLY_STYLES
@@ -11,6 +12,7 @@ import dev.goutou.wingman.llm.ReplyStyle
 import dev.goutou.wingman.llm.applyReplyPlan
 import dev.goutou.wingman.llm.decodeCustomStyles
 import dev.goutou.wingman.llm.encodeCustomStyles
+import dev.goutou.wingman.llm.plannedReplyCount
 import dev.goutou.wingman.llm.replyPlanOf
 
 /**
@@ -92,7 +94,12 @@ object Keys {
     const val GLASS_QUALITY = "glass_quality"
     /** 严格 JSON 输出：请求里带 response_format=json_object（只作用于「生成候选」） */
     const val JSON_MODE = "json_mode"
-    /** 每次给几条候选回复（1..6，见 llm/ReplyPlan.kt）。默认 3，和老行为一致。 */
+    /**
+     * 要几条候选回复（1..MAX_REPLIES，见 llm/ReplyPlan.kt）。默认 3。
+     *
+     * 现在**由「勾了几种风格」派生**（见 [ConfigData.replyPlan]），设置页上已经没有这一项；
+     * 仍然落盘，是为了注入进程和老备份能读到同一个数。
+     */
     const val REPLY_COUNT = "reply_count"
     /**
      * 用户**显式勾选**的回复风格，**一行一个 [ReplyStyle.id]**（见 llm/ReplyPlan.kt 的 REPLY_STYLES）。
@@ -244,10 +251,11 @@ data class ConfigData(
      */
     val jsonMode: Boolean = false,
     /**
-     * 每次给几条候选回复（1..[dev.goutou.wingman.llm.MAX_REPLIES]，默认 3）。
+     * 要几条候选回复（1..[dev.goutou.wingman.llm.MAX_REPLIES]，默认 3）。
      *
-     * 以前这个数是写死的（解析时 `take(4)`、提示词里写「3 条」），现在由用户在设置页选。
-     * 越界在读取时就夹紧（见 llm/ReplyPlan.kt 的 [dev.goutou.wingman.llm.ReplyPlan.of]）。
+     * ⚠️ **设置页上已经没有这一项了**：它由「勾了几种风格」派生
+     *（见 [ConfigData.replyPlan] 与 `llm/plannedReplyCount`）。留在这里、也照常落盘，
+     * 只是为了**注入进程和老备份**能读到同一个数 —— 别再把它当成用户可调的设置。
      */
     val replyCount: Int = 3,
     /**
@@ -368,7 +376,8 @@ data class ConfigData(
             model2 = p.getString(Keys.MODEL2, "").orEmpty(),
             glassQuality = p.getString(Keys.GLASS_QUALITY, GLASS_QUALITY_AUTO).orEmpty().ifBlank { GLASS_QUALITY_AUTO },
             jsonMode = p.getBoolean(Keys.JSON_MODE, false),
-            replyCount = p.getInt(Keys.REPLY_COUNT, 3).coerceIn(1, 6),
+            replyCount = p.getInt(Keys.REPLY_COUNT, DEFAULT_REPLY_COUNT)
+                .coerceIn(MIN_REPLIES, MAX_REPLIES),
             replyStyleIds = readReplyStyleIds(p),
             // 编码文本 → 自定义风格列表。坏行会被 decode 自己跳过，这里不用再兜。
             replyCustomStyles = decodeCustomStyles(p.getString(Keys.REPLY_CUSTOM_STYLES, null).orEmpty()),
@@ -416,7 +425,13 @@ private fun readReplyStyleIds(p: SharedPreferences): List<String> {
  * 的话，**漏掉最后那个参数**就是「自定义风格在某个路径上不生效」—— 而这种漏法是静默的。
  */
 val ConfigData.replyPlan: ReplyPlan
-    get() = replyPlanOf(replyCount, replyStyleIds, replyCustomStyles)
+    get() = replyPlanOf(
+        // 条数**从勾选里派生**（勾几种就写几条）；一种都没勾才回落到存着的 [replyCount]。
+        // 这里是全模块唯一算条数的地方 —— 别的调用点都走这个扩展，别再各算各的。
+        plannedReplyCount(replyStyleIds, replyCount),
+        replyStyleIds,
+        replyCustomStyles,
+    )
 
 /**
  * 配置仓库。
@@ -466,7 +481,7 @@ class ConfigStore(context: Context) {
             .putString(Keys.MODEL2, d.model2.trim())
             .putString(Keys.GLASS_QUALITY, d.glassQuality)
             .putBoolean(Keys.JSON_MODE, d.jsonMode)
-            .putInt(Keys.REPLY_COUNT, d.replyCount.coerceIn(1, 6))
+            .putInt(Keys.REPLY_COUNT, d.replyCount.coerceIn(MIN_REPLIES, MAX_REPLIES))
             // 两个键一起写：新键保序（读取以它为准），旧键留着给已经装机的注入侧/老备份兜底
             .putString(Keys.REPLY_STYLES, d.replyStyleIds.joinToString("\n"))
             .putStringSet(Keys.REPLY_STYLES_SET, d.replyStyleIds.toHashSet())
@@ -607,15 +622,19 @@ class ConfigStore(context: Context) {
      * 「提示词」页是自由编辑的，用户可能自己写过正文，覆盖掉就等于删他的东西。
      * 它只换掉规格段和契约两段，正文原样保留。
      */
-    fun saveReplyPlan(count: Int, styleIds: List<String>) {
-        val n = count.coerceIn(MIN_REPLIES, MAX_REPLIES)
-        // 只留前 n 个。**顺序决定留哪几个** —— 以前存的是 Set，于是「条数只要 3 个却存了 4 个时
-        // 哪 3 个生效」取决于 Set 的遍历顺序，用户看到的是「点了个新的，掉的却是别的那个」。
-        //
+    fun saveReplyPlan(styleIds: List<String>) {
         // 顺手把**已经认不出的 id**（自定义风格被删掉之后的残留）剔掉：留着它会白占一个位置，
         // 而界面上根本没有对应的药丸可以点掉它 —— 症状是「勾了 3 个，只亮 2 个」。
+        //
+        // 顺序**必须留着**（所以是 List 不是 Set）：它决定「第 1 条走哪个风格」，
+        // 也决定超过上限时留下哪几个。以前用 Set 时后一件事取决于遍历顺序，
+        // 用户看到的是「点了个新的，掉的却是别的那个」。
         val known = (REPLY_STYLES + customStyles()).map { it.id }.toSet()
-        val ids = styleIds.map { it.trim() }.filter { it.isNotBlank() && it in known }.distinct().take(n)
+        val ids = styleIds.map { it.trim() }.filter { it.isNotBlank() && it in known }
+            .distinct().take(MAX_REPLIES)
+        // **条数 = 勾选的个数**（见 llm/plannedReplyCount）。存下来只为注入侧 / 老备份能读到同一个数，
+        // 事实来源始终是这份勾选本身 —— 所以这个方法不再收「条数」这个入参了。
+        val n = plannedReplyCount(ids)
         val rebuilt = applyReplyPlan(
             sp.getString(Keys.PROMPT, null).orEmpty().ifBlank { DEFAULT_PROMPT },
             // 自定义风格必须一起带上：不带的话 `custom:xxx` 这种 id 在内置清单里认不出来会被丢掉，
@@ -649,11 +668,15 @@ class ConfigStore(context: Context) {
      */
     fun saveCustomStyles(styles: List<ReplyStyle>) {
         val keep = styles.distinctBy { it.id }
+        val ids = readReplyStyleIds(sp)
         val rebuilt = applyReplyPlan(
             sp.getString(Keys.PROMPT, null).orEmpty().ifBlank { DEFAULT_PROMPT },
             replyPlanOf(
-                sp.getInt(Keys.REPLY_COUNT, 3).coerceIn(MIN_REPLIES, MAX_REPLIES),
-                readReplyStyleIds(sp),
+                // 条数照旧**从勾选派生**（和 [ConfigData.replyPlan] 同一套算法）。
+                // 这里要是按存着的 replyCount 算，两处算法不一致就会留下
+                //「设置页显示一个数、提示词快照另一个数」那种互相打脸的快照。
+                plannedReplyCount(ids, sp.getInt(Keys.REPLY_COUNT, DEFAULT_REPLY_COUNT)),
+                ids,
                 keep,
             ),
         )

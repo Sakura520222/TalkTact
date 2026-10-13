@@ -14,6 +14,7 @@ import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import android.content.SharedPreferences
@@ -66,6 +67,9 @@ internal object PanelRegistry {
  * - 深色模式有对应的配色（原版写死白色卡片，深色主题下非常刺眼）。
  * - 轮询间隔自适应：在聊天页 900ms，不在聊天页 2.6s；并且只有「最后一行变了」才会真正读列表 + 调接口。
  * - 结果按消息指纹缓存，来回切页面不会重复烧 token；两次调用之间有最短间隔限制。
+ *
+ * 候选多的时候（风格能勾到 16 种）卡片会很长，所以候选区外面套了一层高度封顶的可滚动容器，
+ * 见 [CappedScrollView]。
  */
 internal class Panel(private val a: Activity) {
 
@@ -114,6 +118,13 @@ internal class Panel(private val a: Activity) {
     private val card = LinearLayout(a)
     private val title = TextView(a)
     private val bodyBox = LinearLayout(a)
+    /**
+     * 候选行的容器。它外面套了一层**可滚动、且高度封顶**的 ScrollView（见 [CappedScrollView]）：
+     * 风格能勾到 16 种，候选全摊开会把卡片顶出屏幕 —— 而卡片本身不滚动，
+     * 超出去的那些候选**根本点不到**（现象就是「勾了 8 条只看见 3 条」）。
+     */
+    private val listBox = LinearLayout(a)
+    private val listScroll = CappedScrollView(a, (a.resources.displayMetrics.heightPixels * 0.52f).toInt())
     private val chip = TextView(a)
 
     private var attached = false
@@ -339,6 +350,16 @@ internal class Panel(private val a: Activity) {
         head.addView(collapse)
 
         bodyBox.orientation = LinearLayout.VERTICAL
+        // 候选区：外面套一层高度封顶的滚动容器。内容不超时它就是个普通容器，不会出现滚动条。
+        listBox.orientation = LinearLayout.VERTICAL
+        listScroll.isVerticalScrollBarEnabled = true
+        listScroll.addView(
+            listBox,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ),
+        )
         card.addView(head)
         card.addView(bodyBox)
 
@@ -1449,6 +1470,8 @@ internal class Panel(private val a: Activity) {
         title.text = "军师 · ${s.intent} · 风险${s.risk}" + if (fromCache) " · 缓存" else ""
         title.setTextColor(riskColor(s.risk))
         bodyBox.removeAllViews()
+        // listBox 挂在 listScroll 底下，**不随 bodyBox 的 removeAllViews 被清掉**，得单独清一次
+        listBox.removeAllViews()
         bodyBox.addView(label(lastThree(msgs), 10f, colorSub) { setPadding(0, dp(2), 0, dp(2)) })
         if (s.note.isNotBlank()) {
             bodyBox.addView(label(s.note, 12f, colorSub) { setPadding(0, dp(4), 0, dp(2)) })
@@ -1457,6 +1480,15 @@ internal class Panel(private val a: Activity) {
         s.warnings.forEach { w ->
             bodyBox.addView(label(w, 11f, colorWarn) { setPadding(0, dp(4), 0, 0) })
         }
+        // 可滚动的**只包住候选行**：上面那几行（聊天记录 / 诊断 / 说明 / 分级告警）和
+        // 下面那句操作提示都在滚动区外 —— 头尾始终看得见，不用滚回去找。
+        bodyBox.addView(
+            listScroll,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(4) },
+        )
         s.replies.forEachIndexed { index, r ->
             val starred = s.best == index
             // 偏长的候选标一下：提示词要求 40~45 字，太长的不像人话（只提示，不拦）
@@ -1490,13 +1522,13 @@ internal class Panel(private val a: Activity) {
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                     .apply { leftMargin = dp(4) },
             )
-            bodyBox.addView(
+            listBox.addView(
                 row,
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                     .apply { topMargin = dp(6) },
             )
             if (starred && s.why.isNotBlank()) {
-                bodyBox.addView(label("★ 最推荐：${s.why}", 10f, colorSub) { setPadding(dp(12), dp(2), 0, 0) })
+                listBox.addView(label("★ 最推荐：${s.why}", 10f, colorSub) { setPadding(dp(12), dp(2), 0, 0) })
             }
 
             // 三个预设默认不占地方，点「✎」才出现
@@ -1519,7 +1551,7 @@ internal class Panel(private val a: Activity) {
                         .apply { rightMargin = dp(4) },
                 )
             }
-            bodyBox.addView(
+            listBox.addView(
                 opts,
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                     .apply { topMargin = dp(4) },
@@ -1959,4 +1991,18 @@ fun chipTap(expanded: Boolean, busy: Boolean, hasResult: Boolean, hasCache: Bool
     busy || hasResult -> ChipTap.Expand
     hasCache -> ChipTap.Restore
     else -> ChipTap.Regenerate
+}
+
+/**
+ * 高度能按内容撑开、但**封顶到 [cap]** 的 ScrollView（给候选区用，见 [Panel]）。
+ *
+ * 为什么不用普通 ScrollView + WRAP_CONTENT：卡片是挂在微信 decorView 上的，
+ * 一层层把剩余高度给下来时 WRAP_CONTENT 会被撑到接近整屏，头部的标题和底部的操作说明
+ * 反而被挤得看不见。这里明确给一个上限：卡片高度 = 固定的头尾 + 最多 [cap] 的候选区，
+ * 候选再多也只在这一块里滚。
+ */
+private class CappedScrollView(context: Context, private val cap: Int) : ScrollView(context) {
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        super.onMeasure(widthMeasureSpec, View.MeasureSpec.makeMeasureSpec(cap, View.MeasureSpec.AT_MOST))
+    }
 }

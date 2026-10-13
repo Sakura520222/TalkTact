@@ -2,6 +2,8 @@ package dev.goutou.wingman
 
 import dev.goutou.wingman.llm.DEFAULT_STYLE_IDS
 import dev.goutou.wingman.llm.DEFAULT_PROMPT
+import dev.goutou.wingman.llm.DEFAULT_REPLY_COUNT
+import dev.goutou.wingman.llm.MAX_CUSTOM_STYLES
 import dev.goutou.wingman.llm.MAX_REPLIES
 import dev.goutou.wingman.llm.MIN_REPLIES
 import dev.goutou.wingman.llm.REPLY_STYLES
@@ -19,6 +21,8 @@ import dev.goutou.wingman.llm.gradedRiskPrompt
 import dev.goutou.wingman.llm.outputContract
 import dev.goutou.wingman.llm.stripOutputContract
 import dev.goutou.wingman.llm.stripReplyInstruction
+import dev.goutou.wingman.llm.outputBudget
+import dev.goutou.wingman.llm.plannedReplyCount
 import dev.goutou.wingman.llm.toggledStyleIds
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -48,9 +52,20 @@ class ReplyPlanTest {
     fun `条数越界会被夹回合法区间`() {
         assertEquals(MIN_REPLIES, ReplyPlan.of(0, DEFAULT_STYLE_IDS).count)
         assertEquals(MIN_REPLIES, ReplyPlan.of(-5, DEFAULT_STYLE_IDS).count)
-        assertEquals(MAX_REPLIES, ReplyPlan.of(99, DEFAULT_STYLE_IDS).count)
-        // 上限 6 但只有 8 个风格，所以补得齐
-        assertEquals(MAX_REPLIES, ReplyPlan.of(MAX_REPLIES, listOf("safe")).styles.size)
+
+        // 上限要拿「刚好够多的风格」来测：能勾到的就是内置 8 种 + 自定义 8 个 = MAX_REPLIES。
+        // 这一行顺带钉住那条不变量 —— 上限必须跟着风格清单一起走，不能再各写各的。
+        val customs = (1..MAX_CUSTOM_STYLES).map { customStyle("自定$it")!! }
+        val allIds = REPLY_STYLES.map { it.id } + customs.map { it.id }
+        assertEquals(MAX_REPLIES, allIds.size)
+        assertEquals(MAX_REPLIES, ReplyPlan.of(99, allIds, customs).count)
+
+        // 只勾 1 种、却要求上限条数：会按内置清单补齐，但**补齐也受「能勾到的风格数」限制**
+        //（内置一共 8 种）—— 所以条数必须跟着收窄到 8，不能给出
+        //「要求 16 条、却只列了 8 种风格」这种自相矛盾的提示词。
+        val narrow = ReplyPlan.of(MAX_REPLIES, listOf("safe"))
+        assertEquals(REPLY_STYLES.size, narrow.styles.size)
+        assertEquals("条数必须等于风格数", narrow.styles.size, narrow.count)
     }
 
     @Test
@@ -388,6 +403,29 @@ class ReplyPlanTest {
         val next = toggledStyleIds(DEFAULT_STYLE_IDS, st.id, 3, known)
         assertEquals("新加的必须排最前，让位的是末尾那个", listOf(st.id, "safe", "humor"), next)
         assertEquals("总数仍然等于条数", 3, next.size)
+    }
+
+    // ── 条数 = 勾选的个数（设置页上已经没有「条数」这一项了） ──────────────────
+
+    @Test
+    fun `条数就是勾选的个数，一种都没勾才回落到默认`() {
+        assertEquals(5, plannedReplyCount(listOf("a", "b", "c", "d", "e")))
+        assertEquals(DEFAULT_REPLY_COUNT, plannedReplyCount(emptyList()))
+        assertEquals("越界要夹紧", MAX_REPLIES, plannedReplyCount(List(99) { "x$it" }))
+        assertEquals(MIN_REPLIES, plannedReplyCount(emptyList(), fallback = 0))
+    }
+
+    /**
+     * 输出预算必须**跟着条数抬高**。那几档额度（200/400/600）在勾到十几条时一定装不下，
+     * 装不下的后果是 JSON 被截断 —— 看起来只像「模型偷懒少写了几条」，极难查。
+     */
+    @Test
+    fun `条数多了要把输出预算抬上去，无限制就原样不动`() {
+        assertEquals("3 条时 400 够用，不该动它", 400, outputBudget(400, 3))
+        assertTrue("6 条已经超过 400，必须抬", outputBudget(400, 6) > 400)
+        assertTrue("16 条要抬得更高", outputBudget(400, 16) > outputBudget(400, 6))
+        assertEquals("配置成 0 = 无限制，原样传", 0, outputBudget(0, 16))
+        assertEquals("配置本来就比需要大，听配置的", 2000, outputBudget(2000, 3))
     }
 
     // ── 多选（点药丸）的规则 ──────────────────────────────────────────────────

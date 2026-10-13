@@ -60,8 +60,8 @@ const val CUSTOM_STYLE_ID_PREFIX = "custom:"
 /**
  * 最多允许几个自定义风格。
  *
- * 给 8 个：风格区是 4 列换行铺开的，8 个正好两行；再多会把设置页撑得很长，
- * 而且**条数上限是 6**，风格比条数多出一倍以上就没有意义了。
+ * 给 8 个：风格区是 4 列换行铺开的，8 个正好两行；再多会把设置页撑得很长。
+ * 加上内置那 8 种，用户最多能勾 16 种 —— 那正好是条数上限 [MAX_REPLIES]。
  */
 const val MAX_CUSTOM_STYLES = 8
 
@@ -142,14 +142,30 @@ fun decodeCustomStyles(raw: String): List<ReplyStyle> =
  * 条数下限 / 上限。
  *
  * 下限 1：一条也要给 —— 只想要一条最稳妥的就直说，没有比「什么都没给」更糟的结果。
- * 上限 6：再往上候选之间会开始重复（模型没有那么多真正不同的策略），
- * 而且卡片在微信里会被撑得很长，反而没人愿意看完。给到 6 已经偏多。
+ *
+ * 上限 [MAX_REPLIES] = 16，**正好等于「能勾到的风格总数」**（内置 8 种 + 自定义 8 个）。
+ * 之所以从 6 放宽到 16：设置页上那个单独的「条数」已经删掉了，现在**勾几种就写几条**
+ *（见 [plannedReplyCount]），所以这个上限实际就是「最多能勾几种」。
+ * 当初卡在 6 有两条理由 ——「候选会互相换词」和「卡片会被撑长」。后者现在不成立了
+ *（微信浮层里的候选区可滚动），前者用提示语提醒，不再硬拦。
  */
 const val MIN_REPLIES = 1
-const val MAX_REPLIES = 6
+const val MAX_REPLIES = 16
 
-/** 默认 3 条，和以前一样。 */
+/** 一种风格都没勾时用几条（老配置 / 刚装好）。和以前一样是 3。 */
 const val DEFAULT_REPLY_COUNT = 3
+
+/**
+ * 「要几条」的**唯一来源**：勾了几种风格就是几条。
+ *
+ * 设置页上那个单独的「条数」已经不在了 —— 它和风格多选说的是同一件事，同时存在只会互相打架
+ *（勾了 5 种、条数却写着 2，听谁的？）。所以条数从勾选里派生。
+ *
+ * [fallback] 只在**一种都没勾**时生效（老配置 / 刚装好）：那时规格会回落到
+ * [DEFAULT_STYLE_IDS]（默认三样），条数也就该是 [DEFAULT_REPLY_COUNT]。
+ */
+fun plannedReplyCount(selectedIds: List<String>, fallback: Int = DEFAULT_REPLY_COUNT): Int =
+    (if (selectedIds.isEmpty()) fallback else selectedIds.size).coerceIn(MIN_REPLIES, MAX_REPLIES)
 
 /** 一条回复的 style 标签最多显示几个字（超长的自定义风格名会被截，避免把卡片撑破）。 */
 private const val STYLE_LABEL_MAX = 8
@@ -223,11 +239,12 @@ data class ReplyPlan(
          * 从配置算出真正要用的规格。
          *
          * 四个动作，顺序有讲究：
-         * ① 条数夹进 [MIN_REPLIES]..[MAX_REPLIES]；
+         * ① 条数夹进 [MIN_REPLIES]..[MAX_REPLIES]（调用方一般用 [plannedReplyCount] 从勾选里派生）；
          * ② 风格按 [selectedIds] 的顺序认 —— 在**内置 + [customStyles]** 里找，认不出的丢掉；
          *    一个都没认出来就用 [DEFAULT_STYLE_IDS]；
-         * ③ **认出来的风格不够条数时，从内置清单里按固定顺序补齐**；仍然不够就按条数截断；
-         * ④ 只取前 [count] 个。
+         * ③ **认出来的风格不够条数时，从内置清单里按固定顺序补齐**；
+         * ④ 只取前 [count] 个；**补齐之后仍然凑不够就把条数收窄到凑到的个数** ——
+         *    保证 `count` 永远等于 `styles.size`（能勾到的风格总数就是 [MAX_REPLIES]）。
          *
          * ③ 只从**内置**清单补齐，不拿自定义的凑数：自定义是用户一条条手写进来的，
          * 自动「复制」几条出来填位置，等于替他编了他没写过的风格。
@@ -249,12 +266,17 @@ data class ReplyPlan(
             selectedIds.forEach { id -> byId[id]?.let { picked.add(it) } }
             // 一个都没认出来（老配置 / 选了已下线的 id）→ 回默认三样，别给空白卡
             if (picked.isEmpty()) DEFAULT_STYLE_IDS.forEach { id -> byId[id]?.let { picked.add(it) } }
-            // 不够条数就从内置清单补齐（跳过已选的），保证长度真的等于 n
+            // 不够条数就从内置清单补齐（跳过已选的）
             if (picked.size < n) for (s in REPLY_STYLES) {
                 if (picked.size >= n) break
                 picked.add(s)
             }
-            return ReplyPlan(n, picked.take(n))
+            // 补齐也可能**凑不够** —— 能勾到的风格本身就有上限（内置 8 种 + 自定义 8 个）。
+            // 这时把条数**收窄到实际凑到的个数**，而不是硬报一个凑不出来的 n：
+            // 否则提示词会变成「要求给 16 条」+ 只列了 8 种风格，模型只能自己瞎编剩下的。
+            // 顺带钉住一条不变量：`count` 永远等于 `styles.size`。
+            val actual = minOf(n, picked.size)
+            return ReplyPlan(actual, picked.take(actual))
         }
 
         /** 老配置 / 默认值：3 条、稳妥+幽默+推进。 */
@@ -282,15 +304,15 @@ data class ReplyPlan(
  *
  * @param current 现在显式勾着的 id（**保序** —— 顺序决定「第 1 条走哪个风格」）
  * @param known 现在真实存在的风格 id（内置 + 自定义），用来清掉已删除风格的残留
- * @param count 条数：勾超过条数没有意义，只留前 [count] 个
+ * @param limit 勾选个数上限（界面上就是 [MAX_REPLIES]）：超过就没有意义了，只留前几个
  */
 fun toggledStyleIds(
     current: List<String>,
     id: String,
-    count: Int,
+    limit: Int,
     known: Set<String>,
 ): List<String> {
-    val n = count.coerceIn(MIN_REPLIES, MAX_REPLIES)
+    val n = limit.coerceIn(MIN_REPLIES, MAX_REPLIES)
     // 先清掉「已经删掉的风格」残留，再判重 —— 顺序在这里必须留着
     val cur = current.map { it.trim() }.filter { it.isNotBlank() && it in known }.distinct()
     if (id !in known) return cur

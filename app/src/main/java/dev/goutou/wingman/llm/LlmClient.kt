@@ -145,7 +145,11 @@ class LlmClient(
             system = system,
             user = userText,
             temperature = cfg.temperature,
-            maxTokens = cfg.maxTokens,
+            // 条数多了**必须给够输出预算**：每条候选 40~45 字、再加一层 JSON 字段，
+            // 「输出上限」那几档（200/400/600）在勾到十几种风格时一定装不下 ——
+            // 装不下的后果是输出被截断，只能走「抢救」那条路，用户看到的是「勾了 8 条只回来 4 条」。
+            // 所以配置的额度只当**下限**：不够用时按条数往上抬。配置成 0（无限制）就原样传 0。
+            maxTokens = outputBudget(cfg.maxTokens, plan.count),
             jsonMode = cfg.jsonMode,
         )
 
@@ -434,6 +438,23 @@ class LlmClient(
         }
     }
 }
+
+/** 一条候选大概要多少 token：正文 40~45 个中文字（≈45）+ `"style":"xx","text":"…"` 那层壳（≈20）。 */
+private const val TOKENS_PER_REPLY = 65
+
+/** JSON 外壳（intent / risk / note / best / why + 括号逗号）大概的量。 */
+private const val TOKENS_JSON_SHELL = 140
+
+/**
+ * 这次请求的输出预算：**配置的额度是下限，不是上限**。
+ *
+ * 为什么要往上抬：勾的风格多的时候模型要写很多条，那几档额度（200 / 400 / 600）根本装不下，
+ * 输出会被截断 —— 而这是最难查的一类失败（内容少了一半，看起来只像模型偷懒）。
+ * 配置成 0 = 无限制，原样传 0（组装请求时不带 max_tokens）。
+ */
+internal fun outputBudget(configured: Int, replies: Int): Int =
+    if (configured <= 0) 0
+    else maxOf(configured, replies.coerceAtLeast(1) * TOKENS_PER_REPLY + TOKENS_JSON_SHELL)
 
 /** 模型没按契约回时的补正指令（只在第二次尝试时追加到 system 末尾）。 */
 private const val JSON_NUDGE = """【补正】你上一次的输出不是合法 JSON，或者被截断了。

@@ -107,6 +107,7 @@ import dev.goutou.wingman.llm.DEFAULT_STYLE_IDS
 import dev.goutou.wingman.llm.toggledStyleIds
 import dev.goutou.wingman.llm.MAX_CUSTOM_LABEL_LEN
 import dev.goutou.wingman.llm.MAX_CUSTOM_STYLES
+import dev.goutou.wingman.llm.MAX_REPLIES
 import dev.goutou.wingman.llm.customStyle
 import dev.goutou.wingman.llm.applyReplyPlan
 import dev.goutou.wingman.llm.coreOf
@@ -1568,14 +1569,15 @@ fun AdvancedScreen(
     }
 
     /**
- * 「候选条数 + 风格」也**立刻落盘**（原因见 `ConfigStore.saveReplyPlan`）。
+ * 「勾了哪些风格」也**立刻落盘**（原因见 `ConfigStore.saveReplyPlan`）—— 顺手把条数一起更新，
+ * 因为**条数就是从这份勾选派生的**（勾几种就写几条，见 `llm/plannedReplyCount`）。
  *
- * 这两个是纯选择型的：用户点「5 条」时期待的就是下次给 5 条。让它只改了草稿、
- * 混在页底那个「保存」后面，一定会出现「我明明选了怎么还是 3 条」。
+ * 撇开草稿直接落盘是因为它是纯选择型的：用户点一下药丸，期待的就是下次调用按新规格来。
+ * 让它只改草稿、混在页底那个「保存」后面，一定会出现「我明明勾了怎么还是旧的」。
  * 同步回草稿时**只动这两个字段**，别把这一页还在编辑的接口地址一起定死。
  */
-fun saveReplyPlan(count: Int, styleIds: List<String>) {
-    store.saveReplyPlan(count, styleIds)
+fun saveReplyPlan(styleIds: List<String>) {
+    store.saveReplyPlan(styleIds)
     val fresh = store.load()
     d = d.copy(replyCount = fresh.replyCount, replyStyleIds = fresh.replyStyleIds)
     persisted = fresh
@@ -1590,7 +1592,7 @@ fun saveReplyPlan(count: Int, styleIds: List<String>) {
  */
 fun saveCustomStyles(styles: List<ReplyStyle>, styleIds: List<String>) {
     store.saveCustomStyles(styles)
-    store.saveReplyPlan(d.replyCount, styleIds)
+    store.saveReplyPlan(styleIds)
     val fresh = store.load()
     d = d.copy(
         replyCustomStyles = fresh.replyCustomStyles,
@@ -2231,25 +2233,11 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
             val knownIds = REPLY_STYLES.map { it.id }.toSet() + d.replyCustomStyles.map { it.id }
             val chosenIds = explicitIds.filter { it in knownIds }.toSet()
 
-            Text("条数", fontSize = 13.sp, color = palette.sub)
-            Spacer(Modifier.height(6.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                for (n in dev.goutou.wingman.llm.MIN_REPLIES..dev.goutou.wingman.llm.MAX_REPLIES) {
-                    GlassPill("$n", plan.count == n, Modifier.weight(1f)) {
-                        // 只存**显式勾选**的那几个（存的时候按顺序截到 n 个）。
-                        // 补齐是提示词那一侧的隐式行为，不写进配置 —— 写进去「用户勾过哪些」
-                        // 这个事实就丢了，下面的药丸会亮成一片、而且点也点不掉。
-                        saveReplyPlan(n, explicitIds)
-                    }
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-
+            // 「条数」那一行已经删掉了：它和下面这个多选说的是同一件事，同时存在只会互相打架
+            //（勾了 5 种、条数却写着 2，听谁的？）。现在**勾几种就是几条**，
+            // 见 llm/plannedReplyCount —— 这里是它唯一的入口。
             Text(
-                "风格（可多选；亮着的就是你勾的，勾几个就先按几个写，不够的自动补齐）",
+                "风格（可多选，最多 $MAX_REPLIES 种 —— 勾几种就写几条，勾选顺序就是第 1/2/3 条的顺序）",
                 fontSize = 13.sp,
                 color = palette.sub,
             )
@@ -2270,7 +2258,7 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
                                 // 点掉最后一个 = 保持现状），而且只认**显式勾选**那一份。
                                 // 这里**不能**自己算 `chosenIds ± st.id`：那会把自动补齐的风格也当成
                                 // 用户勾过的存下去，于是点一个亮着的风格会「减掉又被补回来」，像没反应。
-                                saveReplyPlan(plan.count, toggledStyleIds(explicitIds, st.id, plan.count, knownIds))
+                                saveReplyPlan(toggledStyleIds(explicitIds, st.id, MAX_REPLIES, knownIds))
                             }
                         }
                         // 一行放不满时用空 Spacer 补齐权重，避免最后几个被拉得特别宽
@@ -2299,7 +2287,7 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             GlassPill(st.displayLabel, st.id in chosenIds, Modifier.weight(1f)) {
-                                saveReplyPlan(plan.count, toggledStyleIds(explicitIds, st.id, plan.count, knownIds))
+                                saveReplyPlan(toggledStyleIds(explicitIds, st.id, MAX_REPLIES, knownIds))
                             }
                             TextButton(
                                 onClick = {
@@ -2345,7 +2333,7 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
                                 // 加了不选中、或者被末尾挤掉，用户看到的就是「加了没用」。
                                 val list = d.replyCustomStyles + st
                                 val next = (listOf(st.id) + explicitIds).distinct()
-                                saveCustomStyles(list, next.take(plan.count))
+                                saveCustomStyles(list, next.take(MAX_REPLIES))
                                 newStyleName = ""
                                 newStyleHint = ""
                                 "已加「${st.displayLabel}」并选中"
@@ -2381,8 +2369,9 @@ val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.C
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                "点一下就生效（立刻落盘，不用等页底那个「保存」）。条数给多了，每条会被摊薄、更容易雷同；" +
-                    "2~3 条通常最实用。",
+                "点一下就生效（立刻落盘，不用等页底那个「保存」）。勾得越多每条会被摊薄、越容易" +
+                    "雷同，模型输出也更容易顶到长度上限（本模块会按条数把输出预算抬到够用）；" +
+                    "2~6 条通常最实用。",
                 fontSize = 13.sp,
                 color = palette.ok,
             )

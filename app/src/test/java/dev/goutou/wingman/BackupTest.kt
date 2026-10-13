@@ -4,6 +4,7 @@ import dev.goutou.wingman.config.Backup
 import dev.goutou.wingman.config.ConfigData
 import dev.goutou.wingman.config.Role
 import dev.goutou.wingman.config.Roles
+import dev.goutou.wingman.llm.MAX_REPLIES
 import dev.goutou.wingman.llm.customStyle
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -103,7 +104,7 @@ class BackupTest {
     fun `备份里越界的条数会被夹回合法区间`() {
         val legacy = """{"app":"TalkTact","schema":1,"config":{"replyCount":999}}"""
         val r = Backup.import(legacy, ConfigData(), emptyList())!!
-        assertEquals(6, r.config.replyCount)
+        assertEquals(MAX_REPLIES, r.config.replyCount)
     }
 
     /**

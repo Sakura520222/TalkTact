@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.sp
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.goutou.wingman.config.ConfigStore
+import dev.goutou.wingman.llm.REPLY_STYLES
 import dev.goutou.wingman.config.Keys
 import dev.goutou.wingman.config.PREF_NAME
 import dev.goutou.wingman.llm.FULL_PROMPT
@@ -256,18 +257,19 @@ class ScreenRenderTest {
      * 界面那条已经被「高级设置里有条数与风格的选择」覆盖了。
      */
     @Test
-    fun `改条数或风格会同步重拼提示词快照`() {
-        store.saveReplyPlan(3, listOf("safe", "humor", "advance"))
+    fun `改风格会同步重拼提示词快照，条数跟着勾选变`() {
+        store.saveReplyPlan(listOf("safe", "humor", "advance"))
         val before = store.load().prompt
+        assertTrue("勾了 3 种就该写 3 条，实际含：$before", before.contains("恰好给 3 条"))
 
-        store.saveReplyPlan(5, listOf("empathy", "brief"))
+        store.saveReplyPlan(listOf("empathy", "brief"))
         val after = store.load().prompt
 
         assertTrue("换规格后提示词快照必须变，否则提示词页看不到任何变化", before != after)
-        assertTrue("新快照要写上新的条数，实际含：$after", after.contains("恰好给 5 条"))
+        assertTrue("勾了 2 种就是 2 条（条数从勾选派生），实际含：$after", after.contains("恰好给 2 条"))
         assertTrue("风格清单也要跟着换，含共情/简短：$after", after.contains("共情") && after.contains("简短"))
         assertTrue("旧条数不该残留：$after", !after.contains("恰好给 3 条"))
-        // 正文是用户的，不能因为改了条数就被换掉
+        // 正文是用户的，不能因为改了规格就被换掉
         assertTrue("正文必须保留", coreOf(before) == coreOf(after))
     }
 
@@ -282,10 +284,11 @@ class ScreenRenderTest {
      */
     @Test
     fun `反复改条数不会让提示词里叠加出多份规格段`() {
-        repeat(4) { i -> store.saveReplyPlan(2 + i, listOf("safe", "humor", "advance")) }
+        // 连点四次，每次勾的个数都不一样（2、3、4、5）—— 规格段里的条数要跟着走
+        repeat(4) { i -> store.saveReplyPlan(REPLY_STYLES.map { it.id }.take(2 + i)) }
         val p = store.load().prompt
         assertEquals(1, Regex("【这次要几条、什么风格】").findAll(p).count())
-        assertEquals("最后一次改的条数要生效", true, p.contains("恰好给 5 条"))
+        assertEquals("最后一次勾了 5 种，就该写 5 条", true, p.contains("恰好给 5 条"))
     }
 
     /**
@@ -296,14 +299,14 @@ class ScreenRenderTest {
     fun `切到满血版 skill 时示例也跟着当前规格走`() {
         val cur = store.load()
         store.save(cur.copy(prompt = FULL_PROMPT))
-        store.saveReplyPlan(4, listOf("empathy", "direct"))
+        store.saveReplyPlan(listOf("empathy", "direct"))
 
         val p = store.load().prompt
-        // 规格段：4 条、风格共情/直接
-        assertTrue("规格段要写 4 条：$p", p.contains("恰好给 4 条"))
+        // 规格段：勾了 2 种 → 2 条，风格共情/直接
+        assertTrue("规格段要写 2 条：$p", p.contains("恰好给 2 条"))
         assertTrue("规格段要写共情：$p", p.contains("共情"))
-        // few-shot 示例：4 个 style 元素
+        // few-shot 示例：2 个 style 元素
         val example = p.substringAfter("【例子】").substringBefore("只输出下面这个 JSON")
-        assertEquals("few-shot 示例要给 4 条：$example", 4, Regex("\"style\":").findAll(example).count())
+        assertEquals("few-shot 示例要给 2 条：$example", 2, Regex("\"style\":").findAll(example).count())
     }
 }
