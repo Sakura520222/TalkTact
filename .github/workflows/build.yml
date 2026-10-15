@@ -1,129 +1,38 @@
-name: build
-on: [workflow_dispatch, push]
+name: Build
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      verify_signing:
+        description: Verify fork signing Secrets and upload a signed APK (owner only; no Release)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   apk:
     runs-on: ubuntu-latest
-    env:
-      # 发布签名：密钥不在仓库里，构建前从 Secrets 还原。
-      # 没配这些 secret 时（比如 fork 出去）build.gradle.kts 会退回默认 debug 签名，构建照样能过。
-      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-      KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
-      # 加密包（signing/key.p12.enc）的口令；只在 KEYSTORE_BASE64 缺失时才会用到
-      KEYSTORE_PASSPHRASE: ${{ secrets.KEYSTORE_PASSPHRASE }}
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - name: restore signing keystore
-        if: env.KEYSTORE_BASE64 != '' || env.KEYSTORE_PASSPHRASE != ''
-        run: |
-          set -e
-          mkdir -p keystore
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            printf '%s' "$KEYSTORE_BASE64" | base64 -d > keystore/talktact.p12
-            echo "keystore 已从 Secrets 还原（KEYSTORE_BASE64）"
-          else
-            # 备用路径：仓库里的加密包 + 口令。KEYSTORE_BASE64 万一丢了，靠它照样能出包。
-            # 口令只在 Secrets / 维护者手里，仓库里那份密文没有口令就是一堆无意义的字节。
-            openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
-              -in signing/key.p12.enc -out keystore/talktact.p12 -pass env:KEYSTORE_PASSPHRASE
-            echo "keystore 已从仓库加密包还原（signing/key.p12.enc）"
-          fi
-          ls -l keystore/talktact.p12
-      # 备份不能过期：signing/key.p12.enc 必须就是当前正在用的那把钥匙
-      # （这条同时也验证了「KEYSTORE_BASE64 丢了 → 用加密包」那条回退路径真的解得开）
-      - name: verify encrypted backup
-        if: env.KEYSTORE_PASSPHRASE != ''
-        run: |
-          set -e
-          openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
-            -in signing/key.p12.enc -out /tmp/backup.p12 -pass env:KEYSTORE_PASSPHRASE
-          A=$(sha256sum /tmp/backup.p12 | cut -d' ' -f1)
-          B=$(sha256sum keystore/talktact.p12 | cut -d' ' -f1)
-          echo "加密包      ：$A"
-          echo "在用密钥    ：$B"
-          if [ "$A" != "$B" ]; then
-            echo "::error::signing/key.p12.enc 与在用的发布密钥不一致 —— 备份过期了，请重新生成"
-            exit 1
-          fi
-          echo "加密备份与在用密钥一致（回退路径可用）"
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
-      # libxposed api/service 102 的 AAR 声明了 minCompileSdk=37，runner 上要有平台 37。
-      # 这里直接调 sdkmanager 而不走 android-actions/setup-android：那个 action 会去装
-      # 「tools」包，而它在新版 SDK 仓库里已被移除，于是整步直接失败。我们只需要平台本身。
-      - name: install Android platform 37
-        run: |
-          set -e
-          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          SDKMANAGER=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
-          echo "sdkmanager: $SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
-          # API 37 是「带次版本号」的平台（Android 16 起引入 minor SDK），
-          # 没有名为 android-37 的包，只有 android-37.0 / .1 / .2
-          "$SDKMANAGER" --install "platforms;android-37.0" "platforms;android-37.1"
-          ls "$ANDROID_HOME/platforms"
-      - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: 8.13 }
-      # 纯逻辑层的单元测试（不依赖 Android SDK，几秒钟）
-      - name: unit test
-        run: gradle :app:testDebugUnitTest --no-daemon --stacktrace
-      - name: build apk
-        run: gradle :app:assembleDebug --no-daemon
-      # 现代 API 的「我是模块」全写在这三个文件上，缺一个框架就不认它（列表里都不出现）。
-      # 反过来，残留 legacy 的 assets/xposed_init 会让框架按老模块处理 —— 那就是白迁了。
-      - name: verify module metadata
-        run: |
-          set -e
-          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
-          echo "检查 $APK"
-          unzip -l "$APK" > /tmp/apk-list.txt
-          for f in META-INF/xposed/module.prop META-INF/xposed/java_init.list META-INF/xposed/scope.list; do
-            if ! grep -q "$f" /tmp/apk-list.txt; then echo "缺少 $f"; exit 1; fi
-          done
-          if grep -q "assets/xposed_init" /tmp/apk-list.txt; then echo "仍残留 legacy assets/xposed_init"; exit 1; fi
-          echo "modern 元数据齐全，且无 legacy 残留"
-      # 签名必须是真的：签不上、或悄悄退回默认 debug key，用户升级就会 INSTALL_FAILED_UPDATE_INCOMPATIBLE。
-      # 注意 minSdk 31 时 AGP 只做 v2/v3 签名，APK 里没有 v1 的 META-INF/*.RSA —— 必须用 apksigner 验。
-      - name: verify apk signature
-        run: |
-          set -e
-          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
-          echo "apk：$APK"
-          echo "sha256：$(sha256sum "$APK" | cut -d' ' -f1)"
-
-          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1 || true)
-          if [ -z "$APKSIGNER" ]; then
-            SDKMANAGER=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
-            "$SDKMANAGER" --install "build-tools;35.0.0" >/dev/null
-            APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
-          fi
-          echo "apksigner：$APKSIGNER"
-          "$APKSIGNER" version
-
-          # 注意：verify 成功时默认什么都不打印，--verbose/--print-certs 才有内容
-          OUT=$("$APKSIGNER" verify --verbose --print-certs "$APK" 2>&1) || {
-            echo "$OUT"
-            echo "::error::APK 验签失败（签名无效）"
-            exit 1
-          }
-          echo "$OUT"
-          # 标签随使用的签名方案变（只有 v2 时是「V2 Signer: certificate SHA-256 digest:」，
-          # 多方案并存时是「Signer #1 certificate ...」）—— 所以只认冒号后面那一段
-          GOT=$(printf '%s\n' "$OUT" | grep -i 'certificate SHA-256 digest:' | head -1 \
-            | sed 's/.*digest: *//' | tr -d ':' | tr 'a-z' 'A-Z')
-          echo "证书 SHA-256（无分隔）：$GOT"
-
-          # 发布证书的指纹（公开信息，硬编码在这里当断言用）
-          EXPECTED=F8D1C2B43AE5EBD3169493937A7DF7AD2C23C59197E29E999E7FCBA626807AD5
-          if { [ -n "$KEYSTORE_BASE64" ] || [ -n "$KEYSTORE_PASSPHRASE" ]; } && [ "$GOT" != "$EXPECTED" ]; then
-            echo "::error::签出来的不是发布证书（是不是退回了默认 debug 签名？）"
-            exit 1
-          fi
-          echo "签名校验通过"
-
-      # 单测报告（always：挂了才有用 —— 失败信息在这里面）
-      - uses: actions/upload-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-android-build
+      # 普通 CI 不读取签名 Secrets，PR 与外部 fork 也能验证。
+      - name: Test and build debug APK
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon --stacktrace
+      - name: Verify APK identity, metadata and signature
+        run: python3 .github/scripts/verify_apk.py app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: test-report
@@ -131,14 +40,54 @@ jobs:
             app/build/reports/tests/
             app/build/test-results/
           if-no-files-found: ignore
-      # 截图回归产出的图（always：单测挂了也把图传上来，方便看是哪一步崩的）
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: screenshots
           path: app/build/screenshots/
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: TalkTact-debug-${{ github.sha }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  signing:
+    name: Verify fork signing
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_signing && github.repository == 'Sakura520222/TalkTact' && github.actor == github.repository_owner
+    needs: apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-android-build
+      - name: Restore fork signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.FORK_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.FORK_KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.FORK_KEYSTORE_ALIAS }}
+        run: bash .github/scripts/restore_signing.sh
+      - name: Build signed release APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.FORK_KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.FORK_KEYSTORE_ALIAS }}
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+      - name: Verify APK and pinned certificate
+        run: python3 .github/scripts/verify_apk.py app/build/outputs/apk/release/app-release.apk --expected-cert signing/certificate.sha256
+      - name: Prepare signed verification artifact
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/signing-verification"
+          cp app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/signing-verification/TalkTact-fork-signed.apk"
+          cd "$RUNNER_TEMP/signing-verification"
+          sha256sum TalkTact-fork-signed.apk > TalkTact-fork-signed.apk.sha256
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: TalkTact-signed-${{ github.sha }}
+          path: ${{ runner.temp }}/signing-verification/
+          if-no-files-found: error
+      - name: Remove restored signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/talktact.p12"

@@ -7,8 +7,13 @@ TalkTact puts a **small button** in the top-right corner of a WeChat chat screen
 LLM-compatible endpoint of your choice, and **filling the reply box** is all it does — it **never sends** for you.
 The card is collapsed by default, so it does not cover your messages.
 
-Current version: **v0.8.11**. See [CHANGELOG.md](CHANGELOG.md) for the history and
-[IMPROVEMENTS.md](IMPROVEMENTS.md) for the design notes.
+This is the independently maintained [Sakura520222/TalkTact](https://github.com/Sakura520222/TalkTact) fork of
+[shibry88-netizen/TalkTact](https://github.com/shibry88-netizen/TalkTact), preserving the original attribution and GPL-3.0.
+The app name **TalkTact** and package **io.github.shibry88_netizen.talktact** are unchanged.
+Only selected valuable upstream changes are integrated; this fork does not submit code upstream.
+
+The source baseline is **0.8.12** (versionCode 39); this does not announce a fork release.
+See [docs/FORK.md](docs/FORK.md) for maintenance and build instructions, and [CHANGELOG.md](CHANGELOG.md) for changes.
 
 ---
 
@@ -55,8 +60,8 @@ Tested against **WeChat 8.0.78**.
   whose name cannot be recognised counts as **not ticked** (fail-closed). Tap "pull chat list" → go back to WeChat's
   home / contacts list for two seconds → come back and tick; chats you opened are collected too.
 - **Offline OCR for images** — text inside a chat image is recognised **on device** (ML Kit Chinese model) and used
-  as the content of that message. **Nothing is uploaded, nothing goes online, nothing is written to disk**; the
-  image only travels between the two local processes over loopback. If it cannot be recognised it falls back to the
+  as the content of that message. **Raw images are not uploaded or written to disk**; the image only travels between the two local processes over loopback.
+  Recognised text becomes chat context sent to the model endpoint configured by the user. If it cannot be recognised it falls back to the
   `[image/emoji/voice]` placeholder. The price is a bigger APK (~70 MB).
 - **Steadier answers** — optional **strict JSON output** (only on the candidate-generation path); one automatic
   corrective retry when the model ignores the contract; when output is cut off by `max_tokens` the finished replies
@@ -69,26 +74,15 @@ Tested against **WeChat 8.0.78**.
 
 ## Signing
 
-The keystore used by CI is **not** in the repository — it lives in repository secrets
-(`KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` / `KEYSTORE_ALIAS`) and is restored to `keystore/talktact.p12` before the
-build. To sign the same APK locally, put that file back in `keystore/` and set `KEYSTORE_PASSWORD`; **if the file is
-missing the build falls back to the default debug signature**, which is fine for local work.
+This fork uses its own stable signing key. Because it retains the original package, it cannot coexist with the original app.
+Before switching, export a backup in Settings, uninstall the previous app, install this fork and import the backup.
 
-A fixed signature is mandatory: GitHub Actions runs on a fresh runner, so the default debug keystore is regenerated
-every time and every build would get a different signature — updating in place would fail with
-`INSTALL_FAILED_UPDATE_INCOMPATIBLE (-7)`.
-
-An **encrypted backup** of the key also lives in the repo (`signing/key.p12.enc`, AES-256-CBC + PBKDF2 with 600000
-iterations + salt). CI prefers `KEYSTORE_BASE64` and only falls back to this archive, so **losing the secrets does
-not lose the key**. The passphrase is not in the repository; see [signing/README.md](signing/README.md).
-
-> ⚠️ **The signing key was rotated in 0.8.8.** Versions up to 0.8.7 used a different key that had been committed to
-> this public repository **together with its passphrase** — effectively a public private key, letting anyone sign an
-> APK that an existing install would accept as an update. It has been revoked and rotated.
->
-> Therefore: **upgrading from 0.8.7 or earlier to 0.8.8+ requires uninstalling the old version first** — your
-> configuration goes with it, so export a backup under "Settings → Backup / migration" and import it afterwards.
-> Please also download only from the module repository or this repository's Releases, which publish a sha256.
+Local private files stay under ignored `keystore/`. Release builds use the repository secrets
+`FORK_KEYSTORE_BASE64`, `FORK_KEYSTORE_PASSWORD`, and `FORK_KEYSTORE_ALIAS`; the resulting APK certificate
+must match [signing/certificate.sha256](signing/certificate.sha256).
+Ordinary CI produces temporary debug builds. Release builds require the stable key and fail if it is missing.
+The inherited `signing/key.p12.enc` belongs to upstream and is not used by this fork.
+See [signing/README.md](signing/README.md).
 
 ## Requirements
 
@@ -99,13 +93,19 @@ not lose the key**. The passphrase is not in the repository; see [signing/README
 
 ## Building
 
-```bash
-# Android Studio can open this directory directly
-gradle :app:testDebugUnitTest   # pure logic unit tests, a few seconds, no device needed
-gradle :app:assembleDebug       # produces app/build/outputs/apk/debug/app-debug.apk
+Use **JDK 17, the Gradle 9.3.1 Wrapper, and AGP 9.1.1**. Android SDK packages and Android Studio setup are documented in [docs/FORK.md](docs/FORK.md).
+
+```powershell
+./gradlew.bat :app:testDebugUnitTest --no-daemon --stacktrace
+./gradlew.bat :app:assembleDebug --no-daemon
+./gradlew.bat :app:assembleRelease --no-daemon  # requires this fork's stable key
 ```
 
-Pushing runs tests and builds an APK on GitHub Actions (see `.github/workflows/build.yml`).
+On Linux / macOS use `./gradlew`. Tests need no phone, but the Android SDK is still required.
+APKs are under `app/build/outputs/apk/{debug,release}/`.
+Branch pushes and PRs run tests and a debug build. Version tags prepare a draft Release only in
+[this fork](https://github.com/Sakura520222/TalkTact/releases), including the verified release APK and SHA-256.
+Existing releases and assets are not overwritten.
 
 ## Installing
 
@@ -175,7 +175,7 @@ app/src/main/java/dev/goutou/wingman/
 
 - FAQ (risk of a ban, root or not, what to do when messages cannot be read): [publish/FAQ.md](publish/FAQ.md)
 - Privacy and data boundaries: [publish/PRIVACY.md](publish/PRIVACY.md)
-- Issues: <https://github.com/shibry88-netizen/TalkTact/issues>
+- Issues: <https://github.com/Sakura520222/TalkTact/issues>
 
 ## License
 

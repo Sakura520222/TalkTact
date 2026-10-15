@@ -8,19 +8,25 @@
 import os, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SKIP_DIRS = {'.git', '.gradle', 'build', '.idea', 'tools', 'dist'}
+SKIP_DIRS = {'.git', '.gradle', '.kotlin', 'build', '.idea', 'tools', 'dist', 'keystore', '.codegraph', '__pycache__'}
+SKIP_FILES = {'local.properties'}
 TEXT_EXT = {'.kt', '.kts', '.xml', '.md', '.properties', '.txt', '.yml', '.yaml', '.py', '.pro'}
 
 files = []
 for base, dirs, names in os.walk(ROOT):
     dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
     for name in names:
+        if name in SKIP_FILES:
+            continue
         path = os.path.join(base, name)
         rel = os.path.relpath(path, ROOT)
         if os.path.splitext(name)[1] in TEXT_EXT or name in {'xposed_init'}:
             files.append((rel.replace(os.sep, '/'), path))
 
 out = sys.stdout
+# Windows 管道默认可能使用本地编码，中文和 emoji 的源码包统一输出 UTF-8。
+if hasattr(out, 'reconfigure'):
+    out.reconfigure(encoding='utf-8', newline='\n')
 for rel, path in sorted(files):
     out.write("#### FILE: %s\n" % rel)
     with open(path, encoding='utf-8') as fh:
