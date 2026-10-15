@@ -4,7 +4,9 @@
 
 本仓库是 [Sakura520222/TalkTact](https://github.com/Sakura520222/TalkTact) 的**独立二改版本**，基于 [shibry88-netizen/TalkTact](https://github.com/shibry88-netizen/TalkTact)。保留应用名称 **TalkTact**、包名 `io.github.shibry88_netizen.talktact` 及 GPL-3.0，不向上游提交代码，只按需合入高价值更新。
 
-当前源码基线为 **0.8.12**（versionCode 39），不代表已经发布二改安装包。构建、签名和维护方式见 [docs/FORK.md](docs/FORK.md)，历次改动见 [CHANGELOG.md](CHANGELOG.md)。
+首个独立二改测试版为 **0.8.12-fork.1**（versionCode 40），基于上游 0.8.12。安装包见 [测试版 Release](https://github.com/Sakura520222/TalkTact/releases/tag/v0.8.12-fork.1)。保留原应用名和包名，使用独立签名；从原版切换前须先导出备份，再卸载安装并导入。
+
+构建、签名和维护方式见 [docs/FORK.md](docs/FORK.md)，历次改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 > English: [README.en.md](README.en.md)
 
@@ -57,7 +59,7 @@ v0.7.0 起本模块改用 **libxposed Modern API 102**（`minApiVersion=102`）�
   液态玻璃面板背后那层**真实背景模糊**用的是 `Modifier.blur`（底层是 `RenderEffect`），这个能力从 Android 12 才提供。
   因此不再为低版本保留「不模糊」的降级分支，Android 12 以下直接装不上。
 - **需要框架提供 libxposed API 102**：LSPosed / Vector，或免 root 的 NPatch 都可以（见上面的兼容表）。
-- 微信 **8.0.78** 上验证通过。
+- 微信 **8.0.78** 为上游基线验证版本；本独立二改测试版尚未进行微信真机复验。
 
 ## 构建
 
@@ -144,7 +146,7 @@ Activity.onResume ──► Panel（每个 Activity 一个）
 
 | 微信版本 | 状态 |
 | :-- | :-- |
-| **8.0.78** | ✅ 已实机验证（基准版本） |
+| **8.0.78** | 上游基线已验证；本独立二改测试版尚未真机复验 |
 | 其它 8.0.x | ⚠️ 未验证，能跑但不保证（群聊行结构在版本间变化较大） |
 
 面向用户的常见问题与隐私说明在 [`publish/`](publish/) 下：[FAQ.md](publish/FAQ.md)、[PRIVACY.md](publish/PRIVACY.md)。

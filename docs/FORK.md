@@ -4,6 +4,10 @@
 [shibry88-netizen/TalkTact](https://github.com/shibry88-netizen/TalkTact) 独立维护。
 保留原作者归属与 GPL-3.0；仅按需筛选上游有价值的提交，不自动同步或向上游提交 PR。
 
+首个独立二改测试版本为 **0.8.12-fork.1**（versionCode 40，基于上游 0.8.12），
+分发入口为 [本 fork 的预发布 Release](https://github.com/Sakura520222/TalkTact/releases/tag/v0.8.12-fork.1)。
+微信 hook、实际玻璃效果和 OCR 尚未真机复验，不能用 JVM 截图或上游历史验证代替。
+
 ## 应用身份
 
 - 应用及模块名称：`TalkTact`。
@@ -85,7 +89,7 @@ KEYSTORE_ALIAS=talktact-fork
 使用独立的 `FORK_` 名称，旧的上游工作流不会读取它们。不需要 `MODULE_REPO_TOKEN`、上游密钥或
 `KEYSTORE_PASSPHRASE`。工作流使用本仓库的 `GITHUB_TOKEN` 写草稿，缺少签名配置或证书不匹配即失败。
 完整单测通过后构建 **release APK**（非 debuggable），再验证签名与现代元数据。
-附件名带 `-fork.apk`，附 SHA-256；同 tag 已有 Release 时失败，不覆盖附件或改写旧说明。
+附件名包含版本号与 fork 标记（版本名已有 `-fork.` 时不重复添加），附 SHA-256；同 tag 已有 Release 时失败，不覆盖附件或改写旧说明。
 草稿审阅后由维护者决定正式发布；Release 的源码归档对应相同标签，分发时保留 GPL-3.0。
 
 本地工作流文件只有在提交并推送到自己的仓库后才会生效。配置 Secrets 不会发布 APK。
