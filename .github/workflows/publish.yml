@@ -1,182 +1,126 @@
-name: publish
-
-# 把 APK 发到 LSPosed 官方模块仓库（Xposed-Modules-Repo）。
-#
-# 为什么需要 MODULE_REPO_TOKEN：那个组织开了「OAuth 应用访问限制」，
-# 普通第三方 OAuth 应用（含网页端登录用的那种）会被挡在写操作之外，PAT 不受这条限制。
-# 建一个 classic token（不是 fine-grained：组织通常不会给外部仓库批 fine-grained 申请），
-# scope 只勾 public_repo 就够（模块仓库是公开仓库）。
-# 然后在本仓库 Settings → Secrets and variables → Actions 里加名为 MODULE_REPO_TOKEN 的 secret。
-#
-# 用法：推一个 v* 标签（比如 git tag v0.6.0 && git push --tags），或者手动点 Run workflow。
-# release 的 tag 会自动取 build.gradle.kts 里的 versionCode-versionName（官方要求这个格式）。
+name: Prepare fork release
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag on main (must match versionName, e.g. v0.8.12-fork.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   publish:
+    if: github.repository == 'Sakura520222/TalkTact'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
     env:
-      # 发布签名：密钥不在仓库里，构建前从 Secrets 还原（缺失时会退回默认 debug 签名）
-      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-      KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-      KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
-      # 加密包（signing/key.p12.enc）的口令；只在 KEYSTORE_BASE64 缺失时才会用到
-      KEYSTORE_PASSPHRASE: ${{ secrets.KEYSTORE_PASSPHRASE }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_REPO: Sakura520222/TalkTact
     steps:
-      - uses: actions/checkout@v4
-      - name: restore signing keystore
-        if: env.KEYSTORE_BASE64 != '' || env.KEYSTORE_PASSPHRASE != ''
-        run: |
-          set -e
-          mkdir -p keystore
-          if [ -n "$KEYSTORE_BASE64" ]; then
-            printf '%s' "$KEYSTORE_BASE64" | base64 -d > keystore/talktact.p12
-            echo "keystore 已从 Secrets 还原（KEYSTORE_BASE64）"
-          else
-            # 备用路径：仓库里的加密包 + 口令。KEYSTORE_BASE64 万一丢了，靠它照样能出包。
-            # 口令只在 Secrets / 维护者手里，仓库里那份密文没有口令就是一堆无意义的字节。
-            openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 \
-              -in signing/key.p12.enc -out keystore/talktact.p12 -pass env:KEYSTORE_PASSPHRASE
-            echo "keystore 已从仓库加密包还原（signing/key.p12.enc）"
-          fi
-          ls -l keystore/talktact.p12
-      - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: 17 }
-      # libxposed api/service 102 的 AAR 声明了 minCompileSdk=37，runner 上要有平台 37。
-      # 这里直接调 sdkmanager 而不走 android-actions/setup-android：那个 action 会去装
-      # 「tools」包，而它在新版 SDK 仓库里已被移除，于是整步直接失败。我们只需要平台本身。
-      - name: install Android platform 37
-        run: |
-          set -e
-          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          SDKMANAGER=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
-          echo "sdkmanager: $SDKMANAGER"
-          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
-          # API 37 是「带次版本号」的平台（Android 16 起引入 minor SDK），
-          # 没有名为 android-37 的包，只有 android-37.0 / .1 / .2
-          "$SDKMANAGER" --install "platforms;android-37.0" "platforms;android-37.1"
-          ls "$ANDROID_HOME/platforms"
-      - uses: gradle/actions/setup-gradle@v4
-        with: { gradle-version: 8.13 }
-
-      - name: build apk
-        run: gradle :app:assembleDebug --no-daemon
-
-      # 签名必须是真的：签不上、或悄悄退回默认 debug key，用户升级就会 INSTALL_FAILED_UPDATE_INCOMPATIBLE。
-      # 注意 minSdk 31 时 AGP 只做 v2/v3 签名，APK 里没有 v1 的 META-INF/*.RSA —— 必须用 apksigner 验。
-      - name: verify apk signature
-        run: |
-          set -e
-          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
-          echo "apk：$APK"
-          echo "sha256：$(sha256sum "$APK" | cut -d' ' -f1)"
-
-          ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1 || true)
-          if [ -z "$APKSIGNER" ]; then
-            SDKMANAGER=$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)
-            "$SDKMANAGER" --install "build-tools;35.0.0" >/dev/null
-            APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
-          fi
-          echo "apksigner：$APKSIGNER"
-          "$APKSIGNER" version
-
-          # 注意：verify 成功时默认什么都不打印，--verbose/--print-certs 才有内容
-          OUT=$("$APKSIGNER" verify --verbose --print-certs "$APK" 2>&1) || {
-            echo "$OUT"
-            echo "::error::APK 验签失败（签名无效）"
-            exit 1
-          }
-          echo "$OUT"
-          # 标签随使用的签名方案变（只有 v2 时是「V2 Signer: certificate SHA-256 digest:」，
-          # 多方案并存时是「Signer #1 certificate ...」）—— 所以只认冒号后面那一段
-          GOT=$(printf '%s\n' "$OUT" | grep -i 'certificate SHA-256 digest:' | head -1 \
-            | sed 's/.*digest: *//' | tr -d ':' | tr 'a-z' 'A-Z')
-          echo "证书 SHA-256（无分隔）：$GOT"
-
-          # 发布证书的指纹（公开信息，硬编码在这里当断言用）
-          EXPECTED=F8D1C2B43AE5EBD3169493937A7DF7AD2C23C59197E29E999E7FCBA626807AD5
-          if { [ -n "$KEYSTORE_BASE64" ] || [ -n "$KEYSTORE_PASSPHRASE" ]; } && [ "$GOT" != "$EXPECTED" ]; then
-            echo "::error::签出来的不是发布证书（是不是退回了默认 debug 签名？）"
-            exit 1
-          fi
-          echo "签名校验通过"
-
-      - name: read version
-        id: v
-        run: |
-          CODE=$(sed -n 's/.*versionCode = \([0-9]\+\).*/\1/p' app/build.gradle.kts | head -1)
-          NAME=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
-          echo "code=$CODE" >> "$GITHUB_OUTPUT"
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
-          echo "准备发布：$CODE-$NAME"
-
-      - name: publish to Xposed-Modules-Repo
+      - name: Validate trigger
         env:
-          GH_TOKEN: ${{ secrets.MODULE_REPO_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          R=Xposed-Modules-Repo/io.github.shibry88_netizen.talktact
-          CODE="${{ steps.v.outputs.code }}"
-          NAME="${{ steps.v.outputs.name }}"
-          TAG="$CODE-$NAME"
-          APK=$(ls app/build/outputs/apk/debug/*.apk | head -1)
-
-          # 附件改成好认的名字（gradle 出来的叫 app-debug.apk，在 release 页面上很迷惑）
-          ASSET="TalkTact-$NAME.apk"
-          cp "$APK" "/tmp/$ASSET"
-          SHA=$(sha256sum "/tmp/$ASSET" | cut -d' ' -f1)
-          echo "$SHA  $ASSET" > "/tmp/$ASSET.sha256"
-
-          # 顺带清掉之前用旧名字传上去的那个附件
-          if gh release view "$TAG" -R "$R" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx 'app-debug.apk'; then
-            gh release delete-asset "$TAG" app-debug.apk -R "$R" --yes
-            echo "已清理旧附件 app-debug.apk"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]
+          if [[ "$EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo '::error::Run this workflow from main with an existing version tag.'
+            exit 1
           fi
-
-          # 同步 SUMMARY / README.md（有就更新，没有就创建）
-          for f in SUMMARY README.md FAQ.md PRIVACY.md; do
-            SHAF=$(gh api "/repos/$R/contents/$f" --jq '.sha' 2>/dev/null || true)
-            if [ -n "$SHAF" ]; then
-              gh api -X PUT "/repos/$R/contents/$f" -f message="Sync $f" \
-                -f content="$(base64 -w0 "publish/$f")" -f sha="$SHAF" >/dev/null
-            else
-              gh api -X PUT "/repos/$R/contents/$f" -f message="Add $f" \
-                -f content="$(base64 -w0 "publish/$f")" >/dev/null
-            fi
-            echo "已同步 $f"
-          done
-
-          # release 说明：带上 sha256（校验下载是否被替换）与需要时的升级提示
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate source and version
+        id: version
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor HEAD origin/main
+          python3 - <<'PY'
+          import os, pathlib, re
+          source = pathlib.Path('app/build.gradle.kts').read_text(encoding='utf-8')
+          name = re.search(r'versionName = "([^"]+)"', source).group(1)
+          code = re.search(r'versionCode = (\d+)', source).group(1)
+          if os.environ['RELEASE_TAG'] != 'v' + name:
+              raise SystemExit('Tag must match versionName exactly')
+          fingerprint = pathlib.Path('signing/certificate.sha256').read_text().strip()
+          if not re.fullmatch(r'[0-9A-Fa-f]{64}', fingerprint):
+              raise SystemExit('Missing fork signing certificate fingerprint')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'name={name}\ncode={code}\n')
+          PY
+      - name: Refuse existing releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          EXISTING_TAGS=$(gh api --paginate "repos/$GH_REPO/releases" --jq '.[].tag_name')
+          if printf '%s\n' "$EXISTING_TAGS" | grep -Fxq -- "$RELEASE_TAG"; then
+            echo '::error::A release already exists for this tag. Existing releases are immutable.'
+            exit 1
+          fi
+      - uses: ./.github/actions/setup-android-build
+      - name: Unit tests before restoring signing material
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --stacktrace
+      - name: Restore fork signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.FORK_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.FORK_KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.FORK_KEYSTORE_ALIAS }}
+        run: bash .github/scripts/restore_signing.sh
+      - name: Build signed release APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.FORK_KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.FORK_KEYSTORE_ALIAS }}
+        run: ./gradlew :app:assembleRelease --no-daemon --stacktrace
+      - name: Verify release APK and pinned certificate
+        run: python3 .github/scripts/verify_apk.py app/build/outputs/apk/release/app-release.apk --expected-cert signing/certificate.sha256
+      - name: Create draft in this fork
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_NAME: ${{ steps.version.outputs.name }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+        run: |
+          set -euo pipefail
+          ASSET="TalkTact-$VERSION_NAME-fork.apk"
+          mkdir -p "$RUNNER_TEMP/release"
+          cp app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/release/$ASSET"
+          cd "$RUNNER_TEMP/release"
+          sha256sum "$ASSET" > "$ASSET.sha256"
           {
-            printf 'TalkTact %s（versionCode %s）\n\n' "$NAME" "$CODE"
-            printf '变更记录：https://github.com/shibry88-netizen/TalkTact/blob/main/CHANGELOG.md\n\n'
-            printf '下载：`%s`\n' "$ASSET"
-            printf 'sha256：`%s`\n' "$SHA"
-            # 固定的风控提示（每次都带，不做成一次性免责）
-            printf '\n---\n\n⚠️ **风控提醒**：本模块会修改微信客户端行为，存在账号风险，请自行评估（建议先用小号）。\n'
-            printf '它只读聊天页上的消息、只把候选回复填进输入框，**不会自动发送**，也不做任何上报 —— 详见 FAQ 与 PRIVACY。\n'
-            if [ "$CODE" -ge 35 ]; then
-              printf '\n---\n\n⚠️ **本版换了签名密钥**（旧密钥曾公开，已作废）：\n'
-              printf '从 0.8.7 及更早版本升级，**必须先卸载旧版再安装** —— 配置会一起删掉，\n'
-              printf '请先在「设置 → 备份 / 迁移」里导出备份，装完再导入。\n'
-            fi
-          } > /tmp/notes.md
-
-          # release：tag 必须是「版本号-版本名」，这是官方硬性要求
-          if gh release view "$TAG" -R "$R" >/dev/null 2>&1; then
-            gh release upload "$TAG" "/tmp/$ASSET" "/tmp/$ASSET.sha256" --clobber -R "$R"
-            gh release edit "$TAG" -R "$R" --title "$NAME" --notes-file /tmp/notes.md
-            echo "已更新既有 release $TAG"
-          else
-            gh release create "$TAG" "/tmp/$ASSET" "/tmp/$ASSET.sha256" -R "$R" \
-              --title "$NAME" --notes-file /tmp/notes.md
-            echo "已创建 release $TAG"
-          fi
-
-          # 提醒：仓库简介（= 模块显示名）走的是 admin 接口，maintain 角色改不了，
-          # 需要在仓库页面右侧 About 面板里手动设置一次。
-          echo "::notice::若仓库简介为空，请手动设置（About → ⚙️ → Description）"
+            printf 'TalkTact %s · 独立二改（versionCode %s）\n\n' "$VERSION_NAME" "$VERSION_CODE"
+            printf '源码及变更：https://github.com/%s/tree/%s\n\n' "$GH_REPO" "$RELEASE_TAG"
+            printf '基于 shibry88-netizen/TalkTact，保留 GPL-3.0 及原作者归属。\n\n'
+            printf '应用名称仍为 TalkTact，包名仍为 io.github.shibry88_netizen.talktact。\n'
+            printf '本 fork 使用独立签名：从原版或 CI 临时 debug 包切换时，先导出备份，再卸载旧版安装并导入。\n'
+            printf '本模块只填入候选，不自动发送；修改微信行为存在账号风险。\n\n'
+            printf 'SHA-256：%s\n' "$(cut -d' ' -f1 "$ASSET.sha256")"
+          } > notes.md
+          # create 在同 tag 已有 Release 时失败，禁止覆盖附件或编辑旧发行物。
+          EXTRA=()
+          [[ "$VERSION_NAME" != *-* ]] || EXTRA+=(--prerelease)
+          gh release create "$RELEASE_TAG" "$ASSET" "$ASSET.sha256" --repo "$GH_REPO" \
+            --verify-tag --draft "${EXTRA[@]}" --title "TalkTact $VERSION_NAME · 独立二改" --notes-file notes.md
+      - name: Remove restored signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/talktact.p12"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: release-test-report
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+            app/build/screenshots/
+          if-no-files-found: ignore

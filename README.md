@@ -2,7 +2,9 @@
 
 在微信聊天页右上角留一个**小按钮**，点开才是候选回复卡片：读最近几条消息 → 调 LLM → 给 3 条风格不同的候选回复 → **点一下填入输入框**（不会自动发送）。默认收起、不挡消息。
 
-当前版本 **v0.8.11**（模块库正式版；0.8.12 正在测试中）。对 v0.1 的重写说明见 [IMPROVEMENTS.md](IMPROVEMENTS.md)，历次改动见 [CHANGELOG.md](CHANGELOG.md)。
+本仓库是 [Sakura520222/TalkTact](https://github.com/Sakura520222/TalkTact) 的**独立二改版本**，基于 [shibry88-netizen/TalkTact](https://github.com/shibry88-netizen/TalkTact)。保留应用名称 **TalkTact**、包名 `io.github.shibry88_netizen.talktact` 及 GPL-3.0，不向上游提交代码，只按需合入高价值更新。
+
+当前源码基线为 **0.8.12**（versionCode 39），不代表已经发布二改安装包。构建、签名和维护方式见 [docs/FORK.md](docs/FORK.md)，历次改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 > English: [README.en.md](README.en.md)
 
@@ -39,25 +41,15 @@ v0.7.0 起本模块改用 **libxposed Modern API 102**（`minApiVersion=102`）�
 
 ## 签名
 
-CI 用的密钥**不在仓库里** —— 它放在仓库 Secrets（`KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` / `KEYSTORE_ALIAS`），
-构建前由 workflow 还原成 `keystore/talktact.p12`。想在本地签出同一个包：把该文件放回 `keystore/`
-并设置 `KEYSTORE_PASSWORD` 环境变量；**文件不存在时会退回默认 debug 签名**，不影响本地编译。
+本 fork 使用自己的固定密钥，和上游发行版签名不同。名称和包名保留，因此不能与原版并存；
+切换前先在「设置 → 备份 / 迁移」导出备份，再卸载旧版、安装本 fork 并导入。
 
-为什么必须固定签名：GitHub Actions 每次跑在全新 runner 上，默认的 `~/.android/debug.keystore` 每次重建，
-于是每个版本的签名都不同，覆盖安装会直接 `INSTALL_FAILED_UPDATE_INCOMPATIBLE (-7)`。
-
-密钥还有一份**加密备份**放在仓库里：`signing/key.p12.enc`（AES-256-CBC + PBKDF2 600000 次迭代 + salt）。
-CI 的还原顺序是「优先 `KEYSTORE_BASE64`，它为空时才用这个加密包 + 口令解出来」——
-也就是说 **Secrets 万一丢了，钥匙照样能找回来重新出包**。口令不在仓库里（只在 Secrets 与维护者手上），
-细节见 [signing/README.md](signing/README.md)。
-
-> ⚠️ **0.8.8 换过签名密钥。** 2026-10-05 之前的版本（≤0.8.7）用的是另一把 key，
-> 而那把 key **连同口令一起提交在公开仓库里** —— 等于公开私钥，任何人都能签出"能被已安装用户当作更新覆盖安装"的包。
-> 已作废并轮换，新密钥只存在于 CI Secrets。
->
-> 因此：**从 0.8.7 及更早版本升级到 0.8.8+，必须先卸载旧版再安装** —— 配置会一起删掉，
-> 请先在「设置 → 备份 / 迁移」里导出备份，装完再导入。
-> 也请只从模块库 / 本仓库 Release 下载，Release 页附有 sha256 供校验。
+本地密钥与口令保存在 Git 忽略的 `keystore/`；发行工作流使用
+`FORK_KEYSTORE_BASE64`、`FORK_KEYSTORE_PASSWORD`、`FORK_KEYSTORE_ALIAS` 三个 Secrets，
+并对照 [证书指纹](signing/certificate.sha256) 验证实际 APK。
+普通 CI 只出临时 debug 包；release 缺少固定签名会失败。
+继承的 `signing/key.p12.enc` 属于上游，本 fork 不使用它。
+详见 [signing/README.md](signing/README.md)。
 
 ## 环境要求
 
@@ -69,13 +61,18 @@ CI 的还原顺序是「优先 `KEYSTORE_BASE64`，它为空时才用这个加�
 
 ## 构建
 
-```bash
-# 用 Android Studio 直接打开本目录也行
-gradle :app:testDebugUnitTest   # 纯逻辑层单测，几秒钟，不需要 Android 设备
-gradle :app:assembleDebug       # 产出 app/build/outputs/apk/debug/app-debug.apk
+使用 **JDK 17 + Gradle Wrapper 9.3.1 + AGP 9.1.1**；Android SDK 安装项及 Android Studio 配置见 [docs/FORK.md](docs/FORK.md)。
+
+```powershell
+./gradlew.bat :app:testDebugUnitTest --no-daemon --stacktrace
+./gradlew.bat :app:assembleDebug --no-daemon
+./gradlew.bat :app:assembleRelease --no-daemon  # 需要本 fork 固定签名
 ```
 
-推上去后 GitHub Actions 会自动跑测试 + 出 APK（见 `.github/workflows/build.yml`）。
+Linux / macOS 使用 `./gradlew`。单测不需要手机，但构建仍需要 Android SDK。
+APK 位于 `app/build/outputs/apk/{debug,release}/`。
+分支 push / PR 会运行测试和 debug 构建；版本标签的发行工作流只在
+[本 fork](https://github.com/Sakura520222/TalkTact/releases) 创建草稿 Release，附签名校验和 SHA-256，不覆盖已有发行物。
 
 ## 安装
 
@@ -84,7 +81,7 @@ gradle :app:assembleDebug       # 产出 app/build/outputs/apk/debug/app-debug.a
 3. 回首页点「接口自检」——真发一次最小请求，确认地址/Key/模型都对。
 4. 到微信里打开一个聊天，右上角会出现「军师」按钮 —— 点一下展开候选回复卡片。
 
-**改配置不需要重启微信**：模块每次识别前会检查配置文件有没有被改过，改了就地重载。
+**改配置不需要重启微信**：配置由框架的 remote preferences 实时同步到微信进程。
 只有「作用域」这类 LSPosed 层面的改动才需要强杀微信。
 
 ## 目录结构
@@ -162,3 +159,7 @@ Activity.onResume ──► Panel（每个 Activity 一个）
 - 角色名从聊天页顶部标题认，认不出来会整页跳过（宁可漏记也不记错人）；偶尔认错的话把那一页的「诊断」发出来即可调。
 - 玻璃面板背后的模糊是**面板级**的：每块玻璃只对「自己那一块」的背景做一次离屏模糊，代价和面板面积成正比。
   默认渐变背景没有细节可模糊，这时会自动跳过，省一次离屏渲染；配了自定义背景图才看得出效果。
+
+## 反馈与许可
+
+二改问题请反馈到 [本仓库 Issues](https://github.com/Sakura520222/TalkTact/issues)。感谢原作者及上游贡献者；保留 [GPL-3.0](LICENSE)，分发修改版时提供对应源码。

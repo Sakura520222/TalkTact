@@ -1,7 +1,27 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
-    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// 本地与 CI 共用同一套配置；本地文件位于已忽略的 keystore/ 中，环境变量优先。
+val localSigning = Properties().apply {
+    val config = rootProject.file("keystore/signing.properties")
+    if (config.isFile) config.inputStream().use { load(it) }
+}
+val signingValue = { name: String ->
+    System.getenv(name)?.takeIf { it.isNotBlank() }
+        ?: localSigning.getProperty(name)?.takeIf { it.isNotBlank() }
+}
+val keystoreFile = file(signingValue("KEYSTORE_PATH") ?: "../keystore/talktact.p12")
+val keystorePassword = signingValue("KEYSTORE_PASSWORD")
+val keystoreAlias = signingValue("KEYSTORE_ALIAS") ?: "talktact"
+val signingRequested = keystoreFile.exists() ||
+    listOf("KEYSTORE_PATH", "KEYSTORE_PASSWORD", "KEYSTORE_ALIAS").any { signingValue(it) != null }
+val hasStableSigning = keystoreFile.isFile && !keystorePassword.isNullOrBlank()
+check(!signingRequested || hasStableSigning) {
+    "固定签名配置不完整：请检查 keystore/signing.properties 或 KEYSTORE_* 环境变量"
 }
 
 android {
@@ -28,28 +48,12 @@ android {
             abiFilters.addAll(listOf("arm64-v8a"))
         }
     }
-    /**
-     * 发布签名：**密钥不进仓库**。
-     *
-     * 为什么要固定签名：GitHub Actions 每次跑在全新 runner 上，默认的 ~/.android/debug.keystore
-     * 是每次重建的 —— 于是每个版本的签名都不一样，覆盖安装会直接报
-     * INSTALL_FAILED_UPDATE_INCOMPATIBLE (-7)。钥匙固定下来，本地和 CI 签出来的才是同一份。
-     *
-     * 钥匙在哪：只存在于 CI Secrets（KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEYSTORE_ALIAS），
-     * workflow 在构建前把它还原成 keystore/talktact.p12。想在本地签出同样的包，把该文件放回
-     * keystore/ 并设置同名环境变量即可（用 KEYSTORE_PATH 可以指到别处）。
-     * **文件缺失时不启用固定签名**，退回默认 debug 签名 —— 本地/下游构建不会因为缺钥匙而失败。
-     *
-     * ⚠️ 2026-10-05 换过钥匙：旧 key 连同口令曾提交在公开仓库里（commit 4f7b58e），等于公开私钥，已作废。
-     * 签名变了 → 从 0.8.7 及更早版本升级的用户必须**卸载重装**（先在「设置 → 备份 / 迁移」导出备份）。
-     */
-    val keystoreFile = file(System.getenv("KEYSTORE_PATH") ?: "../keystore/talktact.p12")
-    val keystorePassword = System.getenv("KEYSTORE_PASSWORD")
-    val stableSigning = if (keystoreFile.exists() && !keystorePassword.isNullOrBlank()) {
+    // 独立二改签名与原版不同。无配置时 debug 可本地构建，release 必须有固定签名。
+    val stableSigning = if (hasStableSigning) {
         signingConfigs.create("stable") {
             storeFile = keystoreFile
             storePassword = keystorePassword
-            keyAlias = System.getenv("KEYSTORE_ALIAS") ?: "talktact"
+            keyAlias = keystoreAlias
             keyPassword = keystorePassword
             storeType = "PKCS12"
         }
@@ -73,7 +77,7 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
+    // AGP 内置 Kotlin 的 JVM target 跟随上面的 targetCompatibility（17）。
     buildFeatures { compose = true }
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -81,6 +85,15 @@ android {
         // 少一个 LSPosed 就当它不是模块（列表里都不出现）
         resources.merges += "META-INF/xposed/*"
     }
+}
+
+val validateReleaseSigning = tasks.register("validateReleaseSigning") {
+    doLast {
+        check(hasStableSigning) { "Release 构建需要本 fork 的固定签名，详见 signing/README.md" }
+    }
+}
+tasks.configureEach {
+    if (name == "preReleaseBuild") dependsOn(validateReleaseSigning)
 }
 
 dependencies {
