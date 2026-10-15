@@ -21,4 +21,5 @@
 附本 fork 固定签名的 release APK 与 SHA-256；不会写上游模块仓库或覆盖旧附件。
 详细配置见 [docs/FORK.md](../docs/FORK.md)。
 
-普通测试 APK 只放在构建目录或 CI artifacts 中，不复制到本目录。未来如需调整留档规则，需作为单独的发行任务处理。
+独立二改测试版通过 [本 fork 的预发布 Release](https://github.com/Sakura520222/TalkTact/releases/tag/v0.8.12-fork.1) 分发。
+普通构建产物和测试 APK 不复制到本目录，本目录继续保留上游正式版历史归属。

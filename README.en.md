@@ -12,7 +12,9 @@ This is the independently maintained [Sakura520222/TalkTact](https://github.com/
 The app name **TalkTact** and package **io.github.shibry88_netizen.talktact** are unchanged.
 Only selected valuable upstream changes are integrated; this fork does not submit code upstream.
 
-The source baseline is **0.8.12** (versionCode 39); this does not announce a fork release.
+The first independent fork test build is **0.8.12-fork.1** (versionCode 40), based on upstream 0.8.12.
+Download it from the [prerelease](https://github.com/Sakura520222/TalkTact/releases/tag/v0.8.12-fork.1).
+The app name and package are preserved, but the signing key differs from upstream: export a backup before uninstalling the original app, then install this fork and import it.
 See [docs/FORK.md](docs/FORK.md) for maintenance and build instructions, and [CHANGELOG.md](CHANGELOG.md) for changes.
 
 ---
@@ -31,7 +33,7 @@ must provide API 102:
 > The no-root (NPatch) route patches the target APK: scope is chosen when patching, not via the module's `scope.list`.
 > Make sure patched WeChat can log in on its own before worrying about the module.
 
-Tested against **WeChat 8.0.78**.
+The upstream baseline was tested against **WeChat 8.0.78**. This fork test build has not yet been revalidated on a physical device.
 
 ## Features
 
@@ -89,7 +91,7 @@ See [signing/README.md](signing/README.md).
 - **Android 12 or newer (API 31+)** — `minSdk = 31`. The real background blur behind the glass panel uses
   `Modifier.blur` (backed by `RenderEffect`), which only exists from Android 12 onwards.
 - **A framework providing libxposed API 102**: LSPosed / Vector, or root-free NPatch.
-- Verified on WeChat **8.0.78**.
+- Upstream baseline: WeChat **8.0.78**. Physical-device behavior of this fork test build remains unverified.
 
 ## Building
 

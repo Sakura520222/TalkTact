@@ -94,6 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           ASSET="TalkTact-$VERSION_NAME-fork.apk"
+          [[ "$VERSION_NAME" != *-fork.* ]] || ASSET="TalkTact-$VERSION_NAME.apk"
           mkdir -p "$RUNNER_TEMP/release"
           cp app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/release/$ASSET"
           cd "$RUNNER_TEMP/release"
