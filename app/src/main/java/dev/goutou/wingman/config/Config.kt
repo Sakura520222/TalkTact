@@ -33,6 +33,8 @@ object Keys {
     const val PROVIDER = "provider_preset"
     const val PROMPT = "prompt_v3"
     const val ENABLED = "enabled"
+    /** QQ 浮窗独立启用，旧配置默认关闭；识别请求仍需用户主动触发。 */
+    const val QQ_ENABLED = "qq_enabled"
     const val CTX = "ctx"
     const val TEMPERATURE = "temperature"
     const val MAX_TOKENS = "max_tokens"
@@ -160,6 +162,8 @@ data class ConfigData(
     val provider: String = "",
     val prompt: String = DEFAULT_PROMPT,
     val enabled: Boolean = true,
+    /** QQ 作为独立宿主显式启用，不沿用已有微信自动分析的授权。 */
+    val qqEnabled: Boolean = false,
     /** 参考最近几条消息（2..20） */
     val ctx: Int = 8,
     val temperature: Double = 0.8,
@@ -290,6 +294,7 @@ data class ConfigData(
             provider = p.getString(Keys.PROVIDER, "").orEmpty(),
             prompt = p.getString(Keys.PROMPT, null).orEmpty().ifBlank { DEFAULT_PROMPT },
             enabled = p.getBoolean(Keys.ENABLED, true),
+            qqEnabled = p.getBoolean(Keys.QQ_ENABLED, false),
             ctx = p.getInt(Keys.CTX, 8).coerceIn(2, 20),
             glassAlpha = p.getFloat(Keys.GLASS, 0.92f).coerceIn(0.30f, 1f),
             glassBlur = p.getFloat(Keys.GLASS_BLUR, 24f).coerceIn(0f, 48f),
@@ -358,6 +363,7 @@ class ConfigStore(context: Context) {
             .putString(Keys.PROVIDER, d.provider)
             .putString(Keys.PROMPT, d.prompt)
             .putBoolean(Keys.ENABLED, d.enabled)
+            .putBoolean(Keys.QQ_ENABLED, d.qqEnabled)
             .putInt(Keys.CTX, d.ctx)
             .putFloat(Keys.TEMPERATURE, d.temperature.toFloat())
             .putInt(Keys.MAX_TOKENS, d.maxTokens)

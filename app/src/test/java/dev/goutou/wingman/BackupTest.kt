@@ -5,6 +5,7 @@ import dev.goutou.wingman.config.ConfigData
 import dev.goutou.wingman.config.Role
 import dev.goutou.wingman.config.Roles
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -67,5 +68,24 @@ class BackupTest {
         assertNull(Backup.import("", ConfigData(), emptyList()))
         assertNull(Backup.import("不是 json", ConfigData(), emptyList()))
         assertNull(Backup.import("""{"app":"TalkTact"}""", ConfigData(), emptyList()))
+    }
+
+    @Test
+    fun `QQ 显式启用可备份而不导出密钥`() {
+        val text = Backup.export(sampleCfg().copy(qqEnabled = true), emptyList(), includeApiKey = false)
+        assertTrue(text.contains("\"qqEnabled\":true"))
+        assertFalse(text.contains("sk-secret"))
+        val restored = Backup.import(text, ConfigData(apiKey = "synthetic-existing-key"), emptyList())!!
+        assertTrue(restored.config.qqEnabled)
+        assertEquals("synthetic-existing-key", restored.config.apiKey)
+    }
+
+    @Test
+    fun `旧备份缺失 QQ 授权时保持关闭且不改变其他缺失字段`() {
+        val current = ConfigData(qqEnabled = true, baseUrl = "https://model.example.invalid/v1", proxyToken = "synthetic-token")
+        val restored = Backup.import("""{"config":{"enabled":true},"roles":[]}""", current, emptyList())!!
+        assertFalse(restored.config.qqEnabled)
+        assertEquals(current.baseUrl, restored.config.baseUrl)
+        assertEquals(current.proxyToken, restored.config.proxyToken)
     }
 }

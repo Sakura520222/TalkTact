@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- 仅调试构建：固定合成场景，无配置、聊天或模型接口入口。 -->
+        <activity
+            android:name=".OverlayPreviewActivity"
+            android:exported="true"
+            android:label="液态浮窗预览" />
+    </application>
+</manifest>

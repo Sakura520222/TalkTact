@@ -4,6 +4,7 @@ import android.app.Activity
 import dev.goutou.wingman.config.Keys
 import dev.goutou.wingman.config.MODULE_PKG
 import dev.goutou.wingman.config.NAMESPACE
+import dev.goutou.wingman.wechat.ChatHost
 import dev.goutou.wingman.wechat.PanelRegistry
 import dev.goutou.wingman.wechat.TextCapture
 import io.github.libxposed.api.XposedModule
@@ -32,7 +33,7 @@ class WingmanEntry : XposedModule() {
 
     /**
      * onPackageReady 的 param 里没有进程名，只有包名，所以进程名得从 onModuleLoaded 存下来。
-     * 微信有 :push 之类的子进程，模块只该在主进程里干活。
+     * 微信和 QQ 都有 :push 之类的子进程，模块只在各自的主进程里干活。
      */
     private var processName = ""
 
@@ -43,12 +44,13 @@ class WingmanEntry : XposedModule() {
     }
 
     override fun onPackageReady(param: XposedModuleInterface.PackageReadyParam) {
-        when (param.packageName) {
-            // 自己的 App 进程：点掉「模块已激活」探针
-            MODULE_PKG -> hookSelf(param.classLoader)
-
-            "com.tencent.mm" -> if (processName == "com.tencent.mm") hookWeChat(param.classLoader)
+        // 自己的 App 进程：保留「模块已激活」探针。
+        if (param.packageName == MODULE_PKG) {
+            hookSelf(param.classLoader)
+            return
         }
+        val host = ChatHost.fromPackage(param.packageName) ?: return
+        if (ChatHost.matchesMainProcess(param.packageName, processName)) hookHost(param.classLoader, host)
     }
 
     /**
@@ -70,41 +72,56 @@ class WingmanEntry : XposedModule() {
         }
     }
 
-    private fun hookWeChat(classLoader: ClassLoader) {
-        XposedApi.log("hooked com.tencent.mm")
-        preHookLearned(classLoader)
+    private fun hookHost(classLoader: ClassLoader, host: ChatHost) {
+        XposedApi.log("hooked ${host.packageName}")
+        // QQ 默认关闭，不能在显式启用 / 手动读取之前预挂正文捕获钩子。
+        if (host == ChatHost.WECHAT) preHookLearned(classLoader)
 
         try {
-            // onResume：先让微信跑完，再拉起面板（等价于 legacy 的 afterHookedMethod）
+            // onResume：先让宿主跑完，再拉起面板（等价于 legacy 的 afterHookedMethod）。
             val onResume = Activity::class.java.getDeclaredMethod("onResume")
             hook(onResume).setId(HOOK_RESUME).intercept { chain ->
                 val result = chain.proceed()
-                val activity = chain.thisObject as? Activity
-                if (activity != null) {
-                    try {
+                try {
+                    val activity = chain.thisObject as? Activity
+                    if (activity != null && activity.packageName == host.packageName) {
                         PanelRegistry.onResume(activity)
-                    } catch (t: Throwable) {
-                        XposedApi.log("onResume: $t")
                     }
+                } catch (t: Throwable) {
+                    XposedApi.log("onResume: $t")
                 }
                 result
             }
 
-            // onPause：先收面板，再让微信继续（等价于 legacy 的 beforeHookedMethod）
+            // onPause：先收面板，再让宿主继续（等价于 legacy 的 beforeHookedMethod）。
             val onPause = Activity::class.java.getDeclaredMethod("onPause")
             hook(onPause).setId(HOOK_PAUSE).intercept { chain ->
-                val activity = chain.thisObject as? Activity
-                if (activity != null) {
-                    try {
+                try {
+                    val activity = chain.thisObject as? Activity
+                    if (activity != null && activity.packageName == host.packageName) {
                         PanelRegistry.onPause(activity)
-                    } catch (t: Throwable) {
-                        XposedApi.log("onPause: $t")
                     }
+                } catch (t: Throwable) {
+                    XposedApi.log("onPause: $t")
+                }
+                chain.proceed()
+            }
+
+            // 移除后台轮询、背景节点和视图；清理失败也必须继续宿主销毁流程。
+            val onDestroy = Activity::class.java.getDeclaredMethod("onDestroy")
+            hook(onDestroy).setId(HOOK_DESTROY).intercept { chain ->
+                try {
+                    val activity = chain.thisObject as? Activity
+                    if (activity != null && activity.packageName == host.packageName) {
+                        PanelRegistry.onDestroy(activity)
+                    }
+                } catch (t: Throwable) {
+                    XposedApi.log("onDestroy: $t")
                 }
                 chain.proceed()
             }
         } catch (t: Throwable) {
-            XposedApi.log("hook WeChat failed: $t")
+            XposedApi.log("hook ${host.label} failed: $t")
         }
     }
 
@@ -118,6 +135,9 @@ class WingmanEntry : XposedModule() {
             val names = prefs.getStringSet(Keys.LEARNED, emptySet()).orEmpty()
             var hooked = 0
             for (name in names) {
+                // 两个宿主共用配置，但不能把 QQ 后续学到的正文类预挂进微信进程。
+                if (name.startsWith("com.tencent.mobileqq.") || name.startsWith("com.tencent.qqnt.") ||
+                    name.startsWith("com.tencent.aio.")) continue
                 if (TextCapture.hookByName(classLoader, name, remember = false)) hooked++
             }
             if (hooked > 0) XposedApi.log("已预先挂好 $hooked 个控件类")
@@ -130,5 +150,6 @@ class WingmanEntry : XposedModule() {
         const val HOOK_SELF = "wingman.module.status"
         const val HOOK_RESUME = "wingman.activity.onResume"
         const val HOOK_PAUSE = "wingman.activity.onPause"
+        const val HOOK_DESTROY = "wingman.activity.onDestroy"
     }
 }

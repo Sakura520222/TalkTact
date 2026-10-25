@@ -6,6 +6,7 @@ import android.content.Intent
 import dev.goutou.wingman.config.Keys
 import dev.goutou.wingman.config.MODULE_PKG
 import dev.goutou.wingman.config.PREF_NAME
+import dev.goutou.wingman.wechat.isValidConversationKey
 
 /**
  * 心跳。
@@ -114,7 +115,7 @@ class HeartbeatReceiver : BroadcastReceiver() {
                 val ignored = sp.getStringSet(Keys.CHAT_IGNORED, emptySet()).orEmpty()
                 val incoming = chats.split('\n')
                     .map { dev.goutou.wingman.config.Roles.normalizeKey(it) }
-                    .filter { it.isNotBlank() && it.length <= 32 && it !in ignored }
+                    .filter { isValidConversationKey(it) && it !in ignored }
                 if (incoming.isNotEmpty()) {
                     val merged = LinkedHashSet(sp.getStringSet(Keys.CHAT_CANDIDATES, emptySet()).orEmpty())
                     merged.addAll(incoming)

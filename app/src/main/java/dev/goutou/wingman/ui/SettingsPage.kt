@@ -27,6 +27,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import dev.goutou.wingman.config.RemoteSync
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -51,6 +54,8 @@ fun SettingsScreen(
     onSaved: () -> Unit = {},
 ) {
     var current by remember(ui) { mutableStateOf(ui) }
+    var qqNote by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
     fun automatic(on: Boolean) {
         store.save(store.load().copy(enabled = on))
         current = store.load()
@@ -70,6 +75,18 @@ fun SettingsScreen(
             HyperRow("会话白名单", if (current.whitelistEnabled) "已启用 · ${current.whitelist.size} 个会话" else "未启用 · 处理所有会话", Icons.Outlined.Security, onClick = { onOpenSection(SettingsSection.WHITELIST) })
             HyperRow("会话列表", "选择要加入白名单的会话", Icons.Outlined.Group, onClick = onOpenCandidates)
             HyperRow("识图与代理", "OCR ${if (current.ocrEnabled) "开" else "关"} · 本地代理 ${if (current.proxyEnabled) "开" else "关"}", Icons.Outlined.Image, onClick = { onOpenSection(SettingsSection.RECOGNITION) })
+        }
+        HyperGroup("QQ") {
+            HyperRow("QQ 浮窗", "默认关闭；启用后手动识别。需在框架作用域勾选 QQ 并重启 QQ。", Icons.Outlined.ChatBubbleOutline,
+                trailing = { Switch(current.qqEnabled, onCheckedChange = { enabled ->
+                    store.save(store.load().copy(qqEnabled = enabled))
+                    current = store.load()
+                    onSaved()
+                    if (enabled) RemoteSync.requestQqScope { _, message ->
+                        scope.launch { if (store.load().qqEnabled) qqNote = message }
+                    } else qqNote = null
+                }) })
+            qqNote?.let { Text(it, Modifier.padding(horizontal = 20.dp, vertical = 8.dp), fontSize = 13.sp, color = LocalPalette.current.sub) }
         }
         HyperGroup("应用") {
             HyperRow("外观", "液态玻璃、效果品质与背景", Icons.Outlined.Palette, onClick = onOpenAppearance)

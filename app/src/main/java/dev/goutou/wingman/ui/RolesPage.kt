@@ -41,6 +41,8 @@ import dev.goutou.wingman.config.Role
 import dev.goutou.wingman.config.Roles
 import dev.goutou.wingman.config.SELF_ROLE_KEY
 import dev.goutou.wingman.llm.StyleSkill
+import dev.goutou.wingman.wechat.conversationDisplayName
+import dev.goutou.wingman.wechat.conversationRawName
 import java.util.Locale
 
 /** 角色首页以搜索、本人风格和联系人为主；档案编辑仍沿用同一条保存与合并链路。 */
@@ -85,7 +87,7 @@ fun RolesScreen(store: ConfigStore, glassAlpha: Float, open: String?, onOpen: (S
     val normalizedQuery = Roles.normalizeKey(query).lowercase(Locale.ROOT)
     val shown = remember(contacts, normalizedQuery) {
         if (normalizedQuery.isBlank()) contacts else contacts.filter { role ->
-            listOf(role.name, role.key, role.relation).any { value ->
+            listOf(conversationDisplayName(role.name), conversationDisplayName(role.key), role.relation).any { value ->
                 Roles.normalizeKey(value).lowercase(Locale.ROOT).contains(normalizedQuery)
             }
         }
@@ -153,11 +155,11 @@ fun RolesScreen(store: ConfigStore, glassAlpha: Float, open: String?, onOpen: (S
                         ),
                     ) {
                         HyperRow(
-                            title = role.name,
+                            title = conversationDisplayName(role.name),
                             subtitle = buildString {
                                 append(role.relation.ifBlank { "未设置关系" })
                                 if (role.note.isNotBlank()) append(" · ").append(role.note.lineSequence().first().take(36))
-                                if (role.renamed) append("\n识别名：").append(role.key)
+                                if (role.renamed) append("\n识别名：").append(conversationDisplayName(role.key))
                                 if (role.lastAt > 0) append("\n最近：").append(formatTime(role.lastAt))
                             },
                             icon = Icons.Outlined.PersonOutline,
@@ -176,7 +178,7 @@ fun RolesScreen(store: ConfigStore, glassAlpha: Float, open: String?, onOpen: (S
 
     pendingDelete?.let { key ->
         // 对话框打开后归档仍可能更新；执行时只删除对应 key，不回写旧列表快照。
-        val name = roles.firstOrNull { it.key == key }?.name ?: key
+        val name = roles.firstOrNull { it.key == key }?.name?.let(::conversationDisplayName) ?: conversationDisplayName(key)
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("删除角色「$name」？") },

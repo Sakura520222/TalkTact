@@ -118,6 +118,9 @@ import dev.goutou.wingman.llm.ModelList
 import dev.goutou.wingman.llm.gradedWaitMs
 import dev.goutou.wingman.llm.isReplyTooLong
 import dev.goutou.wingman.wechat.ChatMsg
+import dev.goutou.wingman.wechat.ChatHost
+import dev.goutou.wingman.wechat.conversationDisplayName
+import dev.goutou.wingman.wechat.conversationRawName
 import dev.goutou.wingman.wechat.Sensitive
 import dev.goutou.wingman.wechat.filterNames
 import kotlinx.coroutines.Dispatchers
@@ -739,6 +742,7 @@ fun AdvancedScreen(
         if (at > 0L) "$head · ${clockText(at)}" else head
     }
     var newChat by remember { mutableStateOf("") }
+    var newChatHost by remember { mutableStateOf(ChatHost.WECHAT) }
     // 白名单的「长按多选」状态。
     // （候选名单那一份跟着名单一起搬到二级页了，见 ChatCandidatesScreen —— 那边自己持有一份。）
     var whitePicking by remember { mutableStateOf(false) }
@@ -1382,6 +1386,10 @@ fun AdvancedScreen(
                     )
                 }
                 if (d.whitelistEnabled) {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        GlassPill("微信", newChatHost == ChatHost.WECHAT, Modifier.weight(1f)) { newChatHost = ChatHost.WECHAT }
+                        GlassPill("QQ", newChatHost == ChatHost.QQ, Modifier.weight(1f)) { newChatHost = ChatHost.QQ }
+                    }
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
@@ -1390,15 +1398,15 @@ fun AdvancedScreen(
                             value = newChat,
                             onValueChange = { newChat = it },
                             modifier = Modifier.weight(1f),
-                            label = { Text("写微信里显示的那个名字") },
+                            label = { Text("${newChatHost.label} 中显示的名称（最多 32 字）") },
                             singleLine = true,
                         )
                         Button(
                             onClick = {
-                                val k = Roles.normalizeKey(newChat)
+                                val k = newChatHost.conversationKey(newChat)
                                 if (k.isNotBlank()) {
                                     saveWhitelist(d.whitelistEnabled, d.whitelist + k)
-                                    whitelistNote = "已加入「$k」"
+                                    whitelistNote = "已加入「${conversationDisplayName(k)}」"
                                     newChat = ""
                                 }
                             },
@@ -1451,7 +1459,7 @@ fun AdvancedScreen(
                     }
                     whiteList.forEach { name ->
                         PickRow(
-                            label = name,
+                            label = conversationDisplayName(name),
                             picking = whitePicking,
                             selected = name in whitePicked,
                             palette = palette,
@@ -1466,7 +1474,7 @@ fun AdvancedScreen(
                             },
                             onAction = {
                                 saveWhitelist(d.whitelistEnabled, d.whitelist - name)
-                                whitelistNote = "已移除「$name」"
+                                whitelistNote = "已移除「${conversationDisplayName(name)}」"
                             },
                         )
                     }
@@ -1840,7 +1848,7 @@ fun ChatCandidatesScreen(
         items(hitTodo) { name ->
             Box(Modifier.padding(horizontal = 30.dp)) {
                 PickRow(
-                    label = name,
+                    label = conversationDisplayName(name),
                     picking = picking,
                     selected = name in picked,
                     palette = palette,
@@ -1855,7 +1863,7 @@ fun ChatCandidatesScreen(
                         saveWhitelist(d.whitelistEnabled, d.whitelist + name)
                         store.unignoreChats(setOf(name))
                         ignoredCount = store.chatIgnored().size
-                        note = "已加入「$name」"
+                        note = "已加入「${conversationDisplayName(name)}」"
                     },
                 )
             }
@@ -1873,7 +1881,7 @@ fun ChatCandidatesScreen(
             items(hitAdded) { name ->
                 Box(Modifier.padding(horizontal = 30.dp)) {
                     PickRow(
-                        label = name,
+                        label = conversationDisplayName(name),
                         picking = false,
                         selected = false,
                         palette = palette,
@@ -1883,7 +1891,7 @@ fun ChatCandidatesScreen(
                         onLongPress = {},
                         onAction = {
                             saveWhitelist(d.whitelistEnabled, d.whitelist - name)
-                            note = "已移出「$name」"
+                            note = "已移出「${conversationDisplayName(name)}」"
                         },
                     )
                 }
@@ -2197,7 +2205,7 @@ internal fun RoleDetail(
     val dirty = (relation to note) != persisted
     var confirm by remember { mutableStateOf<String?>(null) }
     var renameOpen by remember { mutableStateOf(false) }
-    var draft by remember(role.key) { mutableStateOf(role.name) }
+    var draft by remember(role.key) { mutableStateOf(conversationDisplayName(role.name)) }
     // 合并：先选「把谁并进来」，再确认一次（被并掉的那个角色会消失，不可撤销）
     var mergeOpen by remember { mutableStateOf(false) }
     var pendingMerge by remember { mutableStateOf<Role?>(null) }
@@ -2210,7 +2218,7 @@ internal fun RoleDetail(
     }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 112.dp)) {
-        ScreenHeader(role.name, "档案 · ${role.msgs.size} 条记录") {
+        ScreenHeader(conversationDisplayName(role.name), "档案 · ${role.msgs.size} 条记录") {
             TextButton(onClick = { renameOpen = true }) { Text("改名字") }
             Spacer(Modifier.width(8.dp))
             HeaderButton("← 返回", onBack)
@@ -2220,7 +2228,7 @@ internal fun RoleDetail(
             Text("关系", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
             if (role.renamed) {
                 Text(
-                    "（识别到的会话名是「${role.key}」，它负责匹配、不会被改动，所以改了名字以后消息还是记到这一条）",
+                    "（识别到的会话名是「${conversationDisplayName(role.key)}」，它负责匹配、不会被改动，所以改了名字以后消息还是记到这一条）",
                     fontSize = 13.sp,
                     color = palette.sub,
                 )
@@ -2360,7 +2368,7 @@ internal fun RoleDetail(
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "这里只改显示。识别到的会话名「${role.key}」不变 —— 所以改完名字，" +
+                        "这里只改显示。识别到的会话名「${conversationDisplayName(role.key)}」不变 —— 所以改完名字，" +
                             "以后这个会话的消息还是记到同一条上，不会分家。",
                         fontSize = 13.sp,
                         color = palette.sub,
@@ -2384,7 +2392,7 @@ internal fun RoleDetail(
             text = {
                 Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
                     Text(
-                        "合并后：两边记录按时间排好留在「${role.name}」，被并的那个角色会消失。",
+                        "合并后：两边记录按时间排好留在「${conversationDisplayName(role.name)}」，被并的那个角色会消失。",
                         fontSize = 13.sp,
                         color = palette.sub,
                     )
@@ -2401,7 +2409,7 @@ internal fun RoleDetail(
                                 }
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                         ) {
-                            Text(o.name, fontSize = 14.sp, color = palette.text)
+                            Text(conversationDisplayName(o.name), fontSize = 14.sp, color = palette.text)
                             Text(
                                 "${o.msgs.size} 条记录" +
                                     if (o.relation.isNotBlank()) " · ${o.relation}" else "",
@@ -2419,11 +2427,11 @@ internal fun RoleDetail(
     pendingMerge?.let { src ->
         AlertDialog(
             onDismissRequest = { pendingMerge = null },
-            title = { Text("把「${src.name}」合并进来？") },
+            title = { Text("把「${conversationDisplayName(src.name)}」合并进来？") },
             text = {
                 Text(
-                    "「${src.name}」的 ${src.msgs.size} 条记录会并进「${role.name}」，按时间重新排好；" +
-                        "合并完「${src.name}」这个角色就没了，无法撤销。\n\n" +
+                    "「${conversationDisplayName(src.name)}」的 ${src.msgs.size} 条记录会并进「${conversationDisplayName(role.name)}」，按时间重新排好；" +
+                        "合并完「${conversationDisplayName(src.name)}」这个角色就没了，无法撤销。\n\n" +
                         if (role.relation.isBlank() && (src.relation.isNotBlank() || src.note.isNotBlank())) {
                             "这边的「TA 是你什么人 / 平时的关系」还空着，会用它的补上。"
                         } else {
@@ -2436,7 +2444,7 @@ internal fun RoleDetail(
                     store.mergeRoles(src.key, role.key)
                     pendingMerge = null
                     listTick++
-                    mergedNote = "已把「${src.name}」并进来"
+                    mergedNote = "已把「${conversationDisplayName(src.name)}」并进来"
                     onChanged()
                 }) { Text("合并") }
             },

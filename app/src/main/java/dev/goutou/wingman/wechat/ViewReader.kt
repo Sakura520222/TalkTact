@@ -93,6 +93,9 @@ internal class ViewReader(private val a: Activity) {
      * 还是找不到就返回 null，调用方会整页跳过。
      */
     fun findChatTitle(root: View, list: ViewGroup?, avoidTexts: List<String> = emptyList()): String? {
+        if (a.packageName == ChatHost.QQ.packageName) {
+            return qqChatTitle(root, list, avoidTexts)
+        }
         val screenW = width
         val inset = statusBarInset(root)
         val avoid = avoidTexts.map { it.trim() }.filter { it.isNotEmpty() }.toHashSet()
@@ -125,6 +128,42 @@ internal class ViewReader(private val a: Activity) {
             if (best != null) return best
         }
         return null
+    }
+
+    private fun qqChatTitle(root: View, list: ViewGroup?, avoidTexts: List<String>): String? {
+        val top = statusBarInset(root)
+        val bottom = minOf(top + dp(72), list?.let { topOf(it) - dp(2) } ?: (top + dp(72)))
+        var selected: String? = null
+        var score = Int.MIN_VALUE
+        walk(root) { view ->
+            if (view is EditText || list != null && inside(list, view)) return@walk
+            val loc = IntArray(2); view.getLocationOnScreen(loc)
+            if (loc[1] !in top..bottom || view.width < dp(14) || view.height < dp(14)) return@walk
+            if (view !is TextView && view is ViewGroup) return@walk
+            val id = runCatching { view.resources.getResourceEntryName(view.id).lowercase() }.getOrDefault("")
+            val text = if (view is TextView) view.text?.toString()?.trim().orEmpty() else {
+                TextCapture.textOf(view)?.toString()?.trim().orEmpty().ifBlank { reflectText(view) }.ifBlank { a11yText(view) }
+            }
+            val named = id.contains("title") || id in setOf("name", "name_text", "aio_name")
+            val rank = qqChatTitleScore(TitleCandidateSpec(text, view.width, view.height, loc[0], loc[1],
+                (view as? TextView)?.textSize ?: 0f), width, density, top, bottom, named, avoidTexts.toSet()) ?: return@walk
+            if (rank > score) { score = rank; selected = text }
+        }
+        return selected
+    }
+
+    /** 仅查看底部系统输入控件和按钮，不把普通消息列表当成聊天证据。 */
+    fun hasChatComposer(root: View): Boolean {
+        var found = false
+        walk(root) { view ->
+            if (found || !view.isShown || topOf(view) < height * 0.55f) return@walk
+            if (view is EditText && view.width > dp(30) && view.height > 0) { found = true; return@walk }
+            val button = view is android.widget.Button || view is android.widget.ImageButton || view is ImageView
+            if (!button) return@walk
+            val label = view.contentDescription?.toString().orEmpty() + if (view is android.widget.Button) view.text?.toString().orEmpty() else ""
+            if (listOf("按住说话", "按住 说话", "切换到键盘", "切换键盘", "切换到文本", "切换到文字").any { label.contains(it) }) found = true
+        }
+        return found
     }
 
     /** 认不出会话名时，把顶部那一带的候选全列出来（排查用，写进诊断）。 */
