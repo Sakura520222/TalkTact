@@ -14,11 +14,22 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertHeightIsAtLeast
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.click
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -28,11 +39,19 @@ import dev.goutou.wingman.config.ConfigStore
 import dev.goutou.wingman.config.Keys
 import dev.goutou.wingman.config.PREF_NAME
 import dev.goutou.wingman.ui.AdvancedScreen
+import dev.goutou.wingman.ui.StatusScreen
+import dev.goutou.wingman.ui.MentorScreen
+import dev.goutou.wingman.ui.RolesScreen
+import dev.goutou.wingman.ui.SettingsSection
+import dev.goutou.wingman.ui.AppearanceScreen
 import dev.goutou.wingman.ui.ChatCandidatesScreen
 import dev.goutou.wingman.ui.GlassCard
 import dev.goutou.wingman.ui.GlassQuality
 import dev.goutou.wingman.ui.GoutouTheme
 import dev.goutou.wingman.ui.LiquidNavBar
+import dev.goutou.wingman.ui.LiquidNavState
+import dev.goutou.wingman.ui.LocalLiquidNav
+import dev.goutou.wingman.ui.LocalGlassQuality
 import dev.goutou.wingman.ui.RadiusR4
 import dev.goutou.wingman.ui.SettingsScreen
 import dev.goutou.wingman.ui.TrialScreen
@@ -170,14 +189,12 @@ class ScreenRenderTest {
     }
 
     @Test
-    fun `设置页能渲染 外观卡已随设计重做删除`() {
+    fun `设置页能渲染 所有分类直接可达`() {
         page { SettingsScreen(store, store.load(), {}) }
-        // 「接入：」只出现在高级设置入口卡的摘要行（副标题里没有，不会撞车）
-        rule.onNodeWithText("接入：", substring = true).assertExists()
-        rule.onNodeWithText("版本：", substring = true).assertExists()
-        // 外观卡（玻璃强度 / 档位 / 背景图）已删除 —— 出现了就是回退了
-        rule.onNodeWithText("外观").assertDoesNotExist()
-        rule.onNodeWithText("玻璃效果", substring = true).assertDoesNotExist()
+        listOf("接口与模型", "生成方式", "分析设置", "会话白名单", "会话列表", "识图与代理", "外观", "备份与恢复", "诊断与日志").forEach {
+            rule.onNodeWithText(it).assertExists()
+        }
+        rule.onNodeWithText("高级设置").assertDoesNotExist()
         capture("settings")
     }
 
@@ -189,7 +206,7 @@ class ScreenRenderTest {
         rule.onNodeWithText("直通（一套接口）").assertExists()
         rule.onNodeWithText("模型分级").assertExists()
         // 白名单卡顶部那张白底说明 / 注意事项卡也在
-        rule.onNodeWithText("怎么用").assertExists()
+        rule.onNodeWithText("怎么用").assertDoesNotExist()
         // 图片文字识别（OCR）：开关 + 「最近一次」状态行
         rule.onNodeWithText("图片文字识别（OCR）").assertExists()
         rule.onNodeWithText("识别聊天里的图片").assertExists()
@@ -220,11 +237,42 @@ class ScreenRenderTest {
         // Robolectric 上没有 RuntimeShader（LiquidGlass.available=false），
         // 这个用例走的是 LiquidNavBar 的降级分支（莫奈扁卡底）——
         // 真·AGSL 折射（挂在整个内容层上）要靠真机验证，这里保证「底栏还在、页签还在」
-        page { LiquidNavBar(tab = 0) { } }
-        rule.onNodeWithText("状态").assertExists()
-        rule.onNodeWithText("试一试").assertExists()
+        page {
+            var selected by remember { mutableIntStateOf(0) }
+            CompositionLocalProvider(LocalGlassQuality provides GlassQuality.LOW) {
+                LiquidNavBar(tab = selected) { selected = it }
+            }
+        }
+        rule.onNodeWithText("状态").assertIsSelected()
+        listOf("军师", "角色", "试一试", "设置").forEach { label ->
+            rule.onNodeWithText(label).assertHeightIsAtLeast(48.dp).performTouchInput {
+                // 点击页签最下方，防止只有图标 / 文字中间的一小块能够响应。
+                click(Offset(center.x, height - 1f))
+            }
+            rule.onNodeWithText(label).assertIsSelected()
+            rule.onNodeWithText("状态").assertIsNotSelected()
+        }
         capture("liquid-glass-bar")
     }
+
+    private fun renderNavHighlights(dark: Boolean) {
+        page(dark = dark) {
+            CompositionLocalProvider(LocalLiquidNav provides remember { LiquidNavState(true) }) {
+                Box(Modifier.fillMaxSize()) {
+                    LiquidNavBar(tab = 2, modifier = Modifier.align(Alignment.BottomCenter).padding(14.dp)) { }
+                }
+            }
+        }
+        rule.onNodeWithText("角色").assertIsSelected()
+        rule.onNodeWithText("设置").assertExists()
+        capture(if (dark) "liquid-nav-highlight-dark" else "liquid-nav-highlight-light")
+    }
+
+    @Test
+    fun `液态底栏的前景高光能渲染 浅色`() = renderNavHighlights(dark = false)
+
+    @Test
+    fun `液态底栏的前景高光能渲染 深色`() = renderNavHighlights(dark = true)
 
     @Test
     fun `高级设置 深色能渲染`() {
@@ -232,4 +280,53 @@ class ScreenRenderTest {
         rule.onNodeWithText("生成模式").assertExists()
         capture("advanced-dark")
     }
+    @Test
+    fun `状态页仪表盘能渲染`() {
+        store.save(store.load().copy(geoEnabled = false, baseUrl = "http://127.0.0.1:1/v1"))
+        page { StatusScreen(store, onTrial = {}) }
+        rule.onNodeWithText("TalkTact").assertExists()
+        rule.onNodeWithText("模块激活").assertExists()
+        rule.onNodeWithText("开始自检").assertExists()
+        capture("status-dashboard")
+    }
+
+    @Test
+    fun `军师与导入直接展示`() {
+        page { MentorScreen(store, 0.92f) {} }
+        rule.onNodeWithText("内置军师").assertExists()
+        rule.onNodeWithText("从 GitHub 导入").assertExists()
+        capture("mentor")
+    }
+
+    @Test
+    fun `角色页能渲染且本人入口常驻`() {
+        page { RolesScreen(store, 0.92f, null) {} }
+        rule.onNodeWithText("我的说话风格").assertExists()
+        rule.onNodeWithText("这是干什么的").assertDoesNotExist()
+        capture("roles")
+    }
+
+    @Test
+    fun `新设置分类与外观深色能渲染`() {
+        page(dark = true) { SettingsScreen(store, store.load(), {}) }
+        rule.onNodeWithText("备份与恢复").assertExists()
+        capture("settings-dark")
+    }
+
+    @Test
+    fun `识图与代理独立页面能渲染`() {
+        page { AdvancedScreen(store, store.load(), {}, {}, {}, {}, section = SettingsSection.RECOGNITION) }
+        rule.onNodeWithText("识别聊天里的图片").assertExists()
+        rule.onNodeWithText("API Key", substring = false).assertDoesNotExist()
+        capture("recognition")
+    }
+
+    @Test
+    fun `效果品质入口能渲染`() {
+        page { AppearanceScreen(store, {}, {}) }
+        rule.onNodeWithText("效果品质").assertExists()
+        rule.onNodeWithText("背景图片").assertExists()
+        capture("appearance")
+    }
+
 }

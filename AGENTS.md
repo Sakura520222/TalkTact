@@ -37,7 +37,8 @@
 | `wechat/Overlay.kt`、`wechat/ConversationState.kt`、`wechat/Trace.kt` | 微信悬浮面板、生命周期、会话身份、缓存去重和决策轨迹 |
 | `llm/` | 接口形态、请求、提示词、JSON 解析、候选回复及模型分级 |
 | `proxy/`、`ocr/`、`wechat/ImageOcr.kt` | App 内回环代理、离线识图及微信侧图片读取 |
-| `ui/`、`style/SelfStyle.kt` | Compose 页面、玻璃效果与本人说话风格采集 / 提炼 |
+| `ui/HyperComponents.kt`、`ui/*Page.kt`、`ui/Screens.kt` | 五页界面、分组设置、档案详情与诊断 |
+| `ui/LiquidGlass.kt`、`ui/Ui.kt`、`style/SelfStyle.kt` | 底栏玻璃、主题 / 路由与本人风格采集 / 提炼 |
 
 单元测试位于 `app/src/test/java/dev/goutou/wingman/`；构建流程见 `.github/workflows/build.yml`，发布流程见 `.github/workflows/publish.yml`。
 

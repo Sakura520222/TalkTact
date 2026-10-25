@@ -1,6 +1,9 @@
 package dev.goutou.wingman.ui
 
 import android.app.ActivityManager
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.ime
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.graphics.RenderEffect
@@ -54,6 +57,10 @@ import androidx.compose.material3.TextFieldColors
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -569,7 +576,7 @@ private fun monetPalette(mc: Colors, dark: Boolean): Palette = Palette(
     primary = mc.primary,
     soft = mc.tertiaryContainer,
     text = if (dark) Color(0xFFF2F2F2) else Color(0xFF0B0B0F),
-    sub = if (dark) Color(0xFF787E96) else Color(0xFF8C93B0),
+    sub = if (dark) Color(0xFFB9B3C0) else Color(0xFF625E69),
     // 语义色（HyperOS 四色的文字 / 图形两档），不参与 Monet
     ok = if (dark) Color(0xFF4FD296) else Color(0xFF00714A),
     warn = if (dark) Color(0xFFF0B95B) else Color(0xFF8A5A00),
@@ -579,11 +586,11 @@ private fun monetPalette(mc: Colors, dark: Boolean): Palette = Palette(
     badMark = if (dark) Color(0xFFFF8A8A) else Color(0xFFE94634),
     // 背景三段：Monet 的面色系 —— 浅色白→微染沉；深色反过来（旧玻璃时代的
     // 光晕 / 噪点 / 网格字段保留但 alpha 全 0，绘制已随重做删除）
-    bgTop = if (dark) mc.surfaceContainerHighest else mc.surfaceVariant,
-    bgMid = mc.background,
-    bgBottom = if (dark) mc.surfaceVariant else mc.secondaryContainerVariant,
+    bgTop = if (dark) mc.background else lerp(Color.White, mc.background, 0.30f),
+    bgMid = if (dark) mc.background else lerp(Color.White, mc.background, 0.30f),
+    bgBottom = if (dark) mc.background else lerp(Color.White, mc.background, 0.30f),
     bgGlow = mc.tertiaryContainer,
-    bgGlowAlpha = if (dark) 0.10f else 0.16f,
+    bgGlowAlpha = 0f,
     bgVignette = Color.Black,
     bgVignetteAlpha = 0f,
     bgGrain = Color.White,
@@ -976,7 +983,7 @@ fun ScreenHeader(title: String, sub: String, actions: @Composable RowScope.() ->
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 27.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+            Text(title, fontSize = 32.sp, fontWeight = FontWeight.Medium, color = palette.text)
             Text(sub, fontSize = 13.sp, color = palette.sub)
         }
         actions()
@@ -1073,11 +1080,22 @@ private const val TAB_SETTINGS = 4
 
 @Composable
 fun App(store: ConfigStore) {
-    var tab by remember { mutableIntStateOf(0) }
+    var tab by rememberSaveable { mutableIntStateOf(0) }
     // 「角色」的二级页（打开了某个人）也放在这一层：切走 tab 再回来时能回到原位
-    var roleOpen by remember { mutableStateOf<String?>(null) }
+    var roleOpen by rememberSaveable { mutableStateOf<String?>(null) }
     // 「设置」这条线上现在有四层：设置(0) → 高级设置(1) → 诊断(2) / 拉取到的联系人(3)
-    var settingsPage by remember { mutableIntStateOf(0) }
+    var settingsPage by rememberSaveable { mutableIntStateOf(0) }
+    var settingsReturnPage by rememberSaveable { mutableIntStateOf(0) }
+    var settingsSection by rememberSaveable { mutableStateOf(SettingsSection.CONNECTION) }
+    var settingsDirty by remember { mutableStateOf(false) }
+    var settingsSave by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingTab by remember { mutableStateOf<Int?>(null) }
+    val savedPages = rememberSaveableStateHolder()
+    fun selectTab(next: Int) {
+        if (next != TAB_ROLES || next == tab) roleOpen = null
+        if (next != TAB_SETTINGS || next == tab) settingsPage = 0
+        tab = next
+    }
     // 只关心「影响外观」的那几个字段：玻璃透明度/模糊、背景
     var ui by remember { mutableStateOf(store.load()) }
     // 模块健康状态：底栏徽标已移除，详情在「状态」页里看；healthOf 留作页面内部用
@@ -1088,7 +1106,9 @@ fun App(store: ConfigStore) {
         decideGlassQuality(ui.glassQuality, lowRam, Build.VERSION.SDK_INT)
     }
 
+    BackHandler(enabled = tab == TAB_SETTINGS && settingsPage in 2..3) { settingsPage = settingsReturnPage }
     GoutouTheme {
+        val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
         var rootSize by remember { mutableStateOf(IntSize.Zero) }
         val backdrop = rememberBackdrop(ui.bgUri, ui.bgDim, ui.glassBlur)
 
@@ -1096,8 +1116,8 @@ fun App(store: ConfigStore) {
         // 液态玻璃结构反转（2026-10 重写）：折射 RenderEffect 挂在**整个内容层**上，
         // shader 只在底栏矩形内折射（content = 整页真实内容 —— 滚过底栏的文字被真实
         // 弯折 / 色散），矩形外逐像素直通。底栏 UI 只上报矩形 + 弹簧手势。
-        val nav = remember { LiquidNavState() }
         val refraction = remember { LiquidGlass() }
+        val nav = remember { LiquidNavState(refraction.available) }
         CompositionLocalProvider(
             LocalBackdrop provides backdrop,
             LocalRootSize provides rootSize,
@@ -1115,8 +1135,10 @@ fun App(store: ConfigStore) {
                     .fillMaxSize()
                     .onGloballyPositioned { rootSize = it.size },
             ) {
-                Box(Modifier.fillMaxSize().liquidGlassRefraction(nav, glassQuality, refraction)) {
-                    BackgroundLayer(backdrop)
+                Box(Modifier.fillMaxSize().then(if (imeVisible) Modifier else Modifier.liquidGlassRefraction(nav, glassQuality, refraction))) {
+                    if (ui.bgUri.isBlank()) {
+                        Spacer(Modifier.fillMaxSize().background(LocalPalette.current.bgTop))
+                    } else BackgroundLayer(backdrop)
                     Column(
                         Modifier
                             .fillMaxSize()
@@ -1126,8 +1148,13 @@ fun App(store: ConfigStore) {
                                 translationY = (1f - contentAlpha) * 36f
                             },
                     ) {
+                    savedPages.SaveableStateProvider(tab) {
                     when (tab) {
-                        TAB_STATUS -> StatusScreen(store) { tab = TAB_TRIAL }
+                        TAB_STATUS -> StatusScreen(store,
+                            onTrial = { tab = TAB_TRIAL },
+                            onConnection = { settingsSection = SettingsSection.CONNECTION; settingsPage = 1; tab = TAB_SETTINGS },
+                            onDiag = { settingsReturnPage = 0; settingsPage = 2; tab = TAB_SETTINGS },
+                        )
                         TAB_MENTOR -> MentorScreen(store, ui.glassAlpha) { ui = store.load() }
                         TAB_ROLES -> RolesScreen(store, ui.glassAlpha, roleOpen) { roleOpen = it }
                         TAB_TRIAL -> TrialScreen(store, ui.glassAlpha)
@@ -1136,37 +1163,53 @@ fun App(store: ConfigStore) {
                                 store = store,
                                 ui = ui,
                                 onSaved = { ui = store.load() },
-                                onOpenDiag = { settingsPage = 2 },
-                                onOpenCandidates = { settingsPage = 3 },
+                                onOpenDiag = { settingsReturnPage = 1; settingsPage = 2 },
+                                onOpenCandidates = { settingsReturnPage = 1; settingsPage = 3 },
                                 onBack = { settingsPage = 0 },
+                                section = settingsSection,
+                                onDraftState = { dirty, save -> settingsDirty = dirty; settingsSave = save },
                             )
                             // 诊断从「高级设置」里进，所以返回也应该回到高级设置
-                            2 -> DiagScreen(store, ui.glassAlpha) { settingsPage = 1 }
+                            2 -> DiagScreen(store, ui.glassAlpha) { settingsPage = settingsReturnPage }
                             // 「拉取到的联系人」也是从高级设置里进的（白名单卡），返回同理
                             3 -> ChatCandidatesScreen(
                                 store = store,
                                 ui = ui,
                                 onSaved = { ui = store.load() },
-                                onBack = { settingsPage = 1 },
+                                onBack = { settingsPage = settingsReturnPage },
                             )
+                            4 -> AppearanceScreen(store, onSaved = { ui = store.load() }, onBack = { settingsPage = 0 })
+                            5 -> AboutScreen { settingsPage = 0 }
                             else -> SettingsScreen(
                                 store = store,
                                 ui = ui,
-                                onOpenAdvanced = { settingsPage = 1 },
+                                onOpenAdvanced = { settingsSection = SettingsSection.CONNECTION; settingsPage = 1 },
+                                onOpenSection = { settingsSection = it; settingsPage = 1 },
+                                onOpenDiag = { settingsReturnPage = 0; settingsPage = 2 },
+                                onOpenCandidates = { settingsReturnPage = 0; settingsPage = 3 },
+                                onOpenAppearance = { settingsPage = 4 },
+                                onOpenAbout = { settingsPage = 5 },
+                                onSaved = { ui = store.load() },
                             )
                         }
                     }
                 }
+                }   // 保存各页草稿
                 }   // 折射内容层（liquidGlassRefraction 那个 Box）
-                LiquidNavBar(
+                if (!imeVisible) LiquidNavBar(
                     tab = tab,
                     modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(14.dp),
                 ) { next ->
-                    // 离开这一栏就把二级页收掉：切走再回来应该回到列表，而不是停在上次那个二级页；
-                    // 点自己这一栏也当成「退出二级页」。
-                    if (next != TAB_ROLES || next == tab) roleOpen = null
-                    if (next != TAB_SETTINGS || next == tab) settingsPage = 0
-                    tab = next
+                    if (settingsDirty) pendingTab = next else selectTab(next)
+                }
+                pendingTab?.let { next ->
+                    AlertDialog(
+                        onDismissRequest = { pendingTab = null },
+                        title = { Text("有未保存的设置") },
+                        text = { Text("保存后切换页面，或放弃这次修改。") },
+                        confirmButton = { TextButton(onClick = { settingsSave?.invoke(); pendingTab = null; selectTab(next) }) { Text("保存并切换") } },
+                        dismissButton = { TextButton(onClick = { pendingTab = null; selectTab(next) }) { Text("放弃修改") } },
+                    )
                 }
             }
         }

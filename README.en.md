@@ -44,10 +44,8 @@ The upstream baseline was tested against **WeChat 8.0.78**. This fork test build
 - **Per-contact profiles** — archives what you chat about, keyed by WeChat name (the same line is kept once per
   hour). Write "who this person is to you" and "your relationship", and both (plus the archived lines) are folded
   into the prompt.
-- **Glassomorphic UI** — the gradient background is drawn by the app itself (no bundled image); cards are
-  translucent with a top highlight and a bottom edge. "Glass strength" is adjustable, and you can also use your own
-  image (Android 13+ additionally gets real background blur + edge refraction behind the panel). Low-memory devices
-  degrade automatically, and you can pin it manually (**Settings → Appearance → effect quality**).
+- **Liquid glass navigation** — on Android 13+ at high quality, the bar retains sharp background refraction at the rim and gradually adds Gaussian blur toward the center, with soft highlights, gradient edges and spring motion. Icons and labels stay sharp; each entire tab is tappable. Low quality or an unavailable shader uses a plain card.
+- **HyperIsland-inspired pages** — a status dashboard, visible mentor presets and editor, searchable role list, reply preview and grouped settings. Direct entries replace accordions and the generic advanced-settings hub. Large headings, soft grouped cards, dynamic colors and light/dark themes retain the liquid-glass bottom bar.
 - **★ Best pick + per-reply rewrite** — the recommended candidate is marked with a one-line reason
   (`best` / `why` in the output contract); each candidate has a ✎ button (**shorter / more formal / rephrase**) that
   rewrites **only that one**. Replies over 60 characters are flagged "· long".
@@ -169,8 +167,11 @@ app/src/main/java/dev/goutou/wingman/
 │   ├── ViewReader.kt       ★ the only part that depends on Android: view tree → snapshot
 │   └── Overlay.kt          the floating card and its lifecycle
 └── ui/
-    ├── Ui.kt               theme / backdrop / glass components
-    └── Screens.kt          the screens (status / try-it / mentor / profiles / settings)
+    ├── Ui.kt               theme / backdrop / page navigation
+    ├── HyperComponents.kt  shared page and settings components
+    ├── LiquidGlass.kt      liquid-glass bottom navigation
+    ├── *Page.kt            mentor / roles / trial / settings
+    └── Screens.kt          status dashboard / settings forms / profile details / diagnostics
 ```
 
 ## Support

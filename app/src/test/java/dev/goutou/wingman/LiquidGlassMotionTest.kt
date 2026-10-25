@@ -4,6 +4,7 @@ import dev.goutou.wingman.ui.DampedSpring
 import dev.goutou.wingman.ui.GlassMotionFrame
 import dev.goutou.wingman.ui.LiquidGlassMotion
 import dev.goutou.wingman.ui.glassTransformOf
+import androidx.compose.ui.geometry.Offset
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -86,6 +87,21 @@ class LiquidGlassMotionTest {
         val other = t.map(150f, 50f)
         assertEquals(210f, other.x, 1e-4f)
         assertEquals(55f, other.y, 1e-4f)
+    }
+
+    @Test
+    fun `底栏的屏幕位置不参与局部缩放`() {
+        val frame = GlassMotionFrame(press = 1f, touchX = 0.2f, touchY = 0.7f)
+        val transform = glassTransformOf(frame, w = 400f, h = 66f)
+        val origin = Offset(14f, 780f)
+        val localCenter = transform.map(200f, 33f)
+        val screenCenter = transform.map(200f, 33f, origin)
+        assertEquals(localCenter.x + origin.x, screenCenter.x, 1e-4f)
+        assertEquals(localCenter.y + origin.y, screenCenter.y, 1e-4f)
+        // 手指所在锚点在按压时不应相对屏幕漂移。
+        val touch = transform.map(frame.touchX * 400f, frame.touchY * 66f, origin)
+        assertEquals(94f, touch.x, 1e-4f)
+        assertEquals(826.2f, touch.y, 1e-4f)
     }
 
     @Test

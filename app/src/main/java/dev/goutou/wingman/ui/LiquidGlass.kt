@@ -1,7 +1,6 @@
 package dev.goutou.wingman.ui
 
-import android.graphics.Bitmap
-import android.graphics.BitmapShader
+import android.graphics.BlendMode
 import android.graphics.RenderEffect
 import android.graphics.RuntimeShader
 import android.graphics.Shader
@@ -10,7 +9,7 @@ import android.util.Log
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -19,17 +18,20 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -37,9 +39,12 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -47,17 +52,16 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.asComposeRenderEffect
-import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -67,33 +71,13 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
-import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * 底栏「液态玻璃」——Salt Player 12.5.0 MiniPlayer 的**完整**玻璃系统。
- *
- * 三个部分都来自对该 APK 的静态逆向（证据在仓库根 `MiniPlayerLiquidGlass/decompiled-evidence/`，
- * 类名 / 参数 / 公式全部对得上，不是凭视觉重写）：
- *
- * 1. **AGSL 折射着色器**（gr1.java 按 12 次 replace 顺序还原的最终源码）：边缘折射、
- *    RGB 色散、触点 dome。初值取自 C0060.java：refraction=.85 / curve=.7 / dispersion=.4 /
- *    saturation=1 / contrast=1 / tint=0 / edge=.2 / specStrength=0（MiniPlayer 没开高光，
- *    证据里找不到更新它的代码，不臆测补全）。
- * 2. **弹簧运动系统**（m50 / uq1 / vq1.java）：5 个欠阻尼解析积分弹簧 —— 按压、
- *    位移 x/y、触点 x/y；按下 / 松手各一套频率与阻尼，松手轻触还会踢一脚速度（vq1.m7901）。
- *    由此驱动 C0071 case 8 的液滴形变：横拖 → 横胖竖瘦，纵拖 → 竖长，整体平移，锚在触点。
- * 3. **softLight 噪点材质链**（AbstractC1049.m10085，AGSL 原文照抄）：折射之上再叠
- *    一层 softLight 噪点（Salt 用 haze_noise 贴图，这里程序化生成灰度噪声）——
- *    磨砂质感就是这层给的。
- *
- * 每帧 uniform 写法照抄 AbstractC1049.m10084：lensCenter / touchPoint 先经过
- * [GlassTransform] 仿射（`br1.m963`），shapeScale 用非均匀缩放，cornerRadius 夹到半短边。
- * 玻璃上的 UI（图标 / 文字）应用同一个 transform（kh1:420-435 的做法）。
- *
- * 需要 API 33+（RuntimeShader）。低版本 / Robolectric / 编译失败由 [LiquidGlassShell]
- * 退回 [GlassSurface]，档位语义见 [GlassQuality]。
+ * 底栏液态玻璃：保留既有透镜折射、触点 dome 和欠阻尼弹簧。
+ * 清晰背景先折射为透镜，再向中心渐入柔焦；边缘始终采样清晰背景，导航前景不参与模糊。
+ * API 33 以下或着色器不可用时使用普通卡片，低档不启用玻璃与阴影。
  */
 private const val LIQUID_GLASS_AGSL = """
 uniform float2 resolution;
@@ -122,33 +106,12 @@ uniform float specPoolGain;    // focal-pool peak scale
 uniform float2 touchPoint;
 uniform float touchStrength;
 uniform float2 shapeScale;
-uniform float blurRadius;
+uniform float frostedPass;
+uniform float frostWidthPx;
 uniform shader content;
 
 const float SMOOTH_EDGE_PX = 1.5;
 const float SEAM_BLEND_PX = 8.0;   // diagonal blend half-width (px); larger = softer interior crease
-
-// 5×5 高斯权重网格（25-tap，可分离高斯权重 + GPU 双线性采样）：
-// 平滑的「真高斯」观感（Backdrop 的 blur() 用系统 BlurEffect 真高斯；我们挂在整页
-// content 上不能区域化系统 blur，等价做法是在 shader 内做足采样的高斯）。
-// ⚠️ SkSL 不支持嵌套 for 循环（编译直接失败）—— 25 个 tap 用单层循环 + 整除展开。
-// r ≤ 0.5 时直通采样；只在底栏矩形内被调用，矩形外不付出这笔采样成本。
-half3 blur3(float2 c, float r) {
-    if (r <= 0.5) {
-        return content.eval(c).rgb;
-    }
-    half3 acc = half3(0.0);
-    float total = 0.0;
-    float s = r * 0.5;
-    for (int i = 0; i < 25; i++) {
-        int gx = i / 5 - 2;
-        int gy = i - (i / 5) * 5 - 2;
-        float w = exp(-float(gx * gx + gy * gy) * 0.25);
-        acc += content.eval(c + float2(float(gx), float(gy)) * s).rgb * w;
-        total += w;
-    }
-    return acc / total;
-}
 
 // TL, TR, BR, BL; coordinates are relative to the lens center.
 float cornerRadiusAt(float2 p, float2 halfDim) {
@@ -200,9 +163,9 @@ half4 main(float2 xy) {
     float2 p = (xy - lensCenter) / shapeScale;
     float sdf = boxRoundedSDF(p, halfDim, r);
 
-    // Skip pixels outside the lens boundary
+    // Transparent outside the lens: the separate original-page branch stays sharp.
     if (sdf > SMOOTH_EDGE_PX) {
-        return content.eval(xy);
+        return half4(0.0);
     }
 
     float2 normal = normalize(lensNormalDirection(p, halfDim, r) / shapeScale);
@@ -224,41 +187,13 @@ float2 sampleXY = xy - touchBend;
         sampleXY = xy - touchBend - bend * curve * minDim * normal;
     }
 
-    // RGB channel separation for prismatic effect
-    half4 pixel;
+    // 两路输入分别是清晰原页与系统模糊原页，均使用同一个透镜形变。
+    half4 pixel = content.eval(sampleXY);
     if (dispersion > 0.0) {
         float2 normP = p / halfDim;
         float2 shift = dispersion * normP * normP * normP * min(halfDim.x, halfDim.y) * 0.1;
-
-        float2 xyR = sampleXY - shift;
-        float2 xyG = sampleXY;
-        float2 xyB = sampleXY + shift;
-
-        if (blurRadius > 0.5) {
-            // 磨砂：三个色散通道各自过螺旋高斯（模糊的色散）
-            half3 gVal = blur3(xyG, blurRadius);
-            half3 rVal = blur3(xyR, blurRadius * 0.9);
-            half3 bVal = blur3(xyB, blurRadius * 0.9);
-            pixel = half4(rVal.r, gVal.g, bVal.b, 1.0);
-        } else {
-            float sdfR = boxRoundedSDF((xyR - lensCenter) / shapeScale, halfDim, r);
-            float sdfB = boxRoundedSDF((xyB - lensCenter) / shapeScale, halfDim, r);
-
-            half4 gVal = content.eval(xyG);
-            half4 rVal = (sdfR <= 0.0) ? content.eval(xyR) : gVal;
-            half4 bVal = (sdfB <= 0.0) ? content.eval(xyB) : gVal;
-
-            pixel = half4(rVal.r, gVal.g, bVal.b, gVal.a);
-        }
-    } else if (blurRadius > 0.5) {
-        pixel = half4(blur3(sampleXY, blurRadius), 1.0);
-    } else {
-        pixel = content.eval(sampleXY);
-    }
-
-    // Handle fully transparent samples
-    if (pixel.a <= 0.0) {
-        pixel = content.eval(xy);
+        pixel.r = content.eval(sampleXY - shift).r;
+        pixel.b = content.eval(sampleXY + shift).b;
     }
 
     pixel.rgb = processColor(pixel.rgb, saturation, contrast, tint);
@@ -335,79 +270,15 @@ float2 sampleXY = xy - touchBend;
 
     // Anti-aliased edge transition
     float alpha = 1.0 - smoothstep(-SMOOTH_EDGE_PX * 0.5, SMOOTH_EDGE_PX * 0.5, sdf);
-    half4 bg = content.eval(xy);
-    return mix(bg, pixel, alpha);
+    // 柔焦从透镜边缘向内渐入，保留最能看出弯折的清晰倒角带。
+    if (frostedPass > 0.5) {
+        alpha *= smoothstep(2.0, max(frostWidthPx, 3.0), -sdf) * 0.88;
+    }
+    return pixel * half(alpha);
 }
 """
 
-/**
- * softLight 噪点材质链（AbstractC1049.m10085 里的 AGSL **原文**，仅删了 Android Studio 式缩进外层换行）。
- * Salt Player 用它把 haze_noise 贴图以 softLight 混进折射结果，再叠 tintColor —— 磨砂质感的来源。
- */
-private const val NOISE_AGSL = """
-uniform shader content;
-uniform shader noise;
-uniform float noiseAlpha;
-layout(color) uniform half4 tintColor;
-
-half guardedDivide(half numerator, half denominator) {
-    return denominator == 0.0 ? 0.0 : numerator / denominator;
-}
-
-half softLightComponent(half2 source, half2 destination) {
-    if (2.0 * source.x <= source.y) {
-        return guardedDivide(
-            destination.x * destination.x * (source.y - 2.0 * source.x),
-            source.y
-        ) + (1.0 - source.y) * source.x
-        + destination.x * (-source.y + 2.0 * source.x + 1.0);
-    } else if (4.0 * destination.x <= destination.y) {
-        half destinationSquared = destination.x * destination.x;
-        half destinationCubed = destinationSquared * destination.x;
-        half destinationAlphaSquared = destination.y * destination.y;
-        half destinationAlphaCubed = destinationAlphaSquared * destination.y;
-        return guardedDivide(
-            destinationAlphaSquared
-                * (source.x - destination.x * (3.0 * source.y - 6.0 * source.x - 1.0))
-                + 12.0 * destination.y * destinationSquared * (source.y - 2.0 * source.x)
-                - 16.0 * destinationCubed * (source.y - 2.0 * source.x)
-                - destinationAlphaCubed * source.x,
-            destinationAlphaSquared
-        );
-    } else {
-        return destination.x * (source.y - 2.0 * source.x + 1.0)
-            + source.x
-            - sqrt(destination.y * destination.x) * (source.y - 2.0 * source.x)
-            - destination.y * source.x;
-    }
-}
-
-half4 softLight(half4 source, half4 destination) {
-    if (destination.a == 0.0) {
-        return source;
-    }
-    return half4(
-        softLightComponent(source.ra, destination.ra),
-        softLightComponent(source.ga, destination.ga),
-        softLightComponent(source.ba, destination.ba),
-        source.a + (1.0 - source.a) * destination.a
-    );
-}
-
-half4 main(float2 coord) {
-    half4 blurred = content.eval(coord);
-    half4 noiseColor = noise.eval(coord) * noiseAlpha;
-    half4 withNoise = softLight(noiseColor, blurred);
-    half4 tint = tintColor.rgb1 * tintColor.a;
-    return tint + withNoise * (1.0 - tintColor.a);
-}
-"""
-
-/** App 界面侧的日志 tag（诊断底栏玻璃效果时用 logcat 抓这个）。 */
 private const val TAG = "WingmanUi"
-
-/** softLight 噪点的强度（Salt 的 haze_noise 走默认 1.0 缩放，实测观感取略低）。 */
-private const val NOISE_ALPHA = 0.12f
 
 // ================= 弹簧（m50 / vq1 照抄） =================
 
@@ -462,9 +333,9 @@ data class GlassTransform(
     val translationY: Float = 0f,
 ) {
     /** br1.m963：面板坐标点经过本形变后的新位置（lensCenter / touchPoint uniform 都要先过它）。 */
-    fun map(x: Float, y: Float): Offset = Offset(
-        (x - pivotX) * scaleX + pivotX + translationX,
-        (y - pivotY) * scaleY + pivotY + translationY,
+    fun map(x: Float, y: Float, origin: Offset = Offset.Zero): Offset = Offset(
+        (x - pivotX) * scaleX + pivotX + translationX + origin.x,
+        (y - pivotY) * scaleY + pivotY + translationY + origin.y,
     )
 }
 
@@ -556,11 +427,12 @@ class LiquidGlassMotion {
 // ================= shader 封装（AbstractC1049.m10084/m10085 对应） =================
 
 /**
- * 两个 RuntimeShader（折射 + 噪点材质链）与 RenderEffect 缓存。
- * 触摸类 uniform 每帧单独更新 —— RenderEffect 持有同一个 shader 实例，改 uniform 立即生效。
+ * 透镜 RuntimeShader 与系统模糊合成链的缓存。
+ * RuntimeShader 的参数变化后须重新创建运行时 effect；原 effect 持有参数快照。
+ * 静止时复用整个合成链，手势帧只更新透镜快照，系统模糊 effect 单独复用。
  */
 class LiquidGlass {
-    private val liquid: RuntimeShader? =
+    private fun lensShader(): RuntimeShader? =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             try {
                 RuntimeShader(LIQUID_GLASS_AGSL)
@@ -570,71 +442,88 @@ class LiquidGlass {
             }
         } else null
 
-    private val noise: RuntimeShader? =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            try {
-                RuntimeShader(NOISE_AGSL).also {
-                    it.setInputShader("noise", noiseTile())
-                    it.setFloatUniform("noiseAlpha", NOISE_ALPHA)
-                    // 染色仍走 Compose 那层（跟玻璃强度联动），材质链里保持无 tint
-                    it.setColorUniform("tintColor", android.graphics.Color.argb(0, 0, 0, 0))
-                }
-            } catch (t: Throwable) {
-                Log.w(TAG, "noise material AGSL compile failed", t)
-                null
-            }
-        } else null
+    private val liquid = lensShader()
+    private val frosted = lensShader()
 
-    val available: Boolean get() = liquid != null
+    val available: Boolean get() = liquid != null && frosted != null
 
-    /** (w, h) → RenderEffect 的缓存；内容层 = 整屏，尺寸基本不变，实际只建一次。 */
-    private val cache = HashMap<Long, RenderEffect?>()
+    // 只缓存当前尺寸与半径，旋转或密度变化后替换，避免无限累积离屏 effect。
+    private var cachedSize = IntSize.Zero
+    private var cachedBlur = Float.NaN
+    private var cachedEffect: RenderEffect? = null
+    private data class LensFrame(
+        val motion: GlassMotionFrame,
+        val transform: GlassTransform,
+        val origin: Offset,
+        val size: Size,
+        val radius: Float,
+    )
+    private var currentFrame: LensFrame? = null
+    private var cachedFrame: LensFrame? = null
+    private var blurEffect: RenderEffect? = null
+    private var blurEffectRadius = Float.NaN
 
-    /**
-     * 静态 uniform（C0060 初值）+ RenderEffect 链：refraction → softLight 噪点（m10085 的
-     * createChainEffect，噪点层在外层、折射在内层 —— 即先折射再给噪点做 softLight）。
-     * **挂在内容层上**：shader 只在底栏矩形内做折射，矩形外逐像素直通 ——
-     * content 输入是整页真实内容（滚过底栏的文字就是在这里被弯折的）。
-     */
+    /** 清晰折射为底，中心渐入高斯柔焦；最后覆盖回清晰原页，蒙版外保持原样。 */
     fun effect(w: Int, h: Int, blurPx: Float): RenderEffect? {
         val sh = liquid ?: return null
+        val frost = frosted ?: return null
         if (w <= 0 || h <= 0) return null
-        return cache.getOrPut((w.toLong() shl 20) or h.toLong()) {
-            try {
-                // C0060.java 初值（README 头有对照）。偏离的两处：
-                // ① specStrength 0 → 0.65：Salt 没开高光，但玻璃的「静态存在感」全靠
-                //    边缘透镜高光；② blurRadius 是我们加的磨砂层（Salt 用 Haze 材质做）；
-                // ③ saturation 1 → 1.12：磨砂会把背景洗灰，提一点饱和补回来（vibrancy）。
-                sh.setFloatUniform("resolution", w.toFloat(), h.toFloat())
-                sh.setFloatUniform("refraction", 0.85f)
-                sh.setFloatUniform("curve", 0.7f)
-                sh.setFloatUniform("dispersion", 0.4f)
-                sh.setFloatUniform("saturation", 1.12f)
-                sh.setFloatUniform("contrast", 1f)
-                sh.setFloatUniform("tint", 0f, 0f, 0f, 0f)
-                sh.setFloatUniform("edge", 0.2f)
-                sh.setFloatUniform("blurRadius", blurPx)
-                sh.setFloatUniform("lightDir", -1f, -1f)
-                sh.setFloatUniform("specStrength", 0.65f)
-                sh.setFloatUniform("specPower", 1f)
-                sh.setFloatUniform("specRimMix", 0.4f)
-                sh.setFloatUniform("specWidthPx", 12f)
-                sh.setFloatUniform("specLightZ", 0.55f)
-                sh.setFloatUniform("specDomeFrac", 1.15f)
-                sh.setFloatUniform("specBodyPower", 2.5f)
-                sh.setFloatUniform("specBodyGain", 0.6f)
-                sh.setFloatUniform("specFocalK", 0.55f)
-                sh.setFloatUniform("specPoolFrac", 0.7f)
-                sh.setFloatUniform("specPoolGain", 1.3f)
-                val liquidEffect = RenderEffect.createRuntimeShaderEffect(sh, "content")
-                // Salt 的 softLight 噪点材质链（m10085）按需求移除：那层颗粒是「磨砂感」
-                // 的来源，这里要的是干净的高斯模糊 —— 折射 + 高斯 + 透镜高光即可。
-                liquidEffect
-            } catch (t: Throwable) {
-                Log.w(TAG, "liquid glass effect build failed", t)
-                null
+        val blur = blurPx.coerceAtLeast(0f)
+        if (cachedSize == IntSize(w, h) && cachedBlur == blur && cachedFrame == currentFrame) return cachedEffect
+        cachedSize = IntSize(w, h)
+        cachedBlur = blur
+        cachedFrame = currentFrame
+        cachedEffect = try {
+            for (shader in listOf(sh, frost)) {
+                shader.setFloatUniform("resolution", w.toFloat(), h.toFloat())
+                shader.setFloatUniform("refraction", 0.85f)
+                shader.setFloatUniform("curve", 0.7f)
+                shader.setFloatUniform("dispersion", 0.24f)
+                shader.setFloatUniform("saturation", 1.08f)
+                shader.setFloatUniform("contrast", 1f)
+                shader.setFloatUniform("tint", 0f, 0f, 0f, 0f)
+                shader.setFloatUniform("edge", 0.2f)
+                shader.setFloatUniform("lightDir", -1f, -1f)
+                shader.setFloatUniform("specStrength", 0.38f)
+                shader.setFloatUniform("specPower", 3f)
+                shader.setFloatUniform("specRimMix", 0.65f)
+                shader.setFloatUniform("specWidthPx", 12f)
+                shader.setFloatUniform("specLightZ", 0.55f)
+                shader.setFloatUniform("specDomeFrac", 1.15f)
+                shader.setFloatUniform("specBodyPower", 2.5f)
+                shader.setFloatUniform("specBodyGain", 0.4f)
+                shader.setFloatUniform("specFocalK", 0.55f)
+                shader.setFloatUniform("specPoolFrac", 0.7f)
+                shader.setFloatUniform("specPoolGain", 0.8f)
+                shader.setFloatUniform("frostWidthPx", blur * 1.15f)
             }
+            sh.setFloatUniform("frostedPass", 0f)
+            frost.setFloatUniform("frostedPass", 1f)
+            val lens = RenderEffect.createRuntimeShaderEffect(sh, "content")
+            val frostedLens = if (blur > 0f) {
+                if (blurEffectRadius != blur) {
+                    blurEffect = RenderEffect.createBlurEffect(blur, blur, Shader.TileMode.CLAMP)
+                    blurEffectRadius = blur
+                }
+                RenderEffect.createBlendModeEffect(
+                    lens,
+                    RenderEffect.createChainEffect(
+                        RenderEffect.createRuntimeShaderEffect(frost, "content"),
+                        requireNotNull(blurEffect),
+                    ),
+                    BlendMode.SRC_OVER,
+                )
+            } else lens
+            RenderEffect.createBlendModeEffect(
+                RenderEffect.createOffsetEffect(0f, 0f),
+                frostedLens,
+                BlendMode.SRC_OVER,
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "liquid glass effect build failed", t)
+            null
         }
+        return cachedEffect
     }
 
     /**
@@ -651,35 +540,28 @@ class LiquidGlass {
         barH: Float,
         radiusPx: Float,
     ) {
-        val sh = liquid ?: return
+        if (!available) return
+        val next = LensFrame(frame, transform, Offset(barLeft, barTop), Size(barW, barH), radiusPx)
+        if (next == currentFrame) return
         try {
-            sh.setFloatUniform("lensSize", barW, barH)
-            val r = radiusPx.coerceIn(0f, minOf(barW, barH) * 0.5f)   // m10087：夹到半短边
-            sh.setFloatUniform("cornerRadii", r, r, r, r)
-            val center = transform.map(barLeft + barW * 0.5f, barTop + barH * 0.5f)
-            sh.setFloatUniform("lensCenter", center.x, center.y)
-            sh.setFloatUniform("shapeScale", transform.scaleX, transform.scaleY)
-            val touch = transform.map(barLeft + frame.touchX * barW, barTop + frame.touchY * barH)
-            sh.setFloatUniform("touchPoint", touch.x, touch.y)
-            // m10084：clamp(press, 0, 1)（负值是松手回弹的过冲，不给 dome 用）
-            sh.setFloatUniform("touchStrength", frame.press.coerceIn(0f, 1f))
+            for (sh in listOfNotNull(liquid, frosted)) {
+                sh.setFloatUniform("lensSize", barW, barH)
+                val r = radiusPx.coerceIn(0f, minOf(barW, barH) * 0.5f)   // m10087：夹到半短边
+                sh.setFloatUniform("cornerRadii", r, r, r, r)
+                // pivot 是底栏局部坐标；先做局部形变，再平移到内容层，不能把屏幕原点一起缩放。
+                val origin = Offset(barLeft, barTop)
+                val center = transform.map(barW * 0.5f, barH * 0.5f, origin)
+                sh.setFloatUniform("lensCenter", center.x, center.y)
+                sh.setFloatUniform("shapeScale", transform.scaleX, transform.scaleY)
+                val touch = transform.map(frame.touchX * barW, frame.touchY * barH, origin)
+                sh.setFloatUniform("touchPoint", touch.x, touch.y)
+                // m10084：clamp(press, 0, 1)（负值是松手回弹的过冲，不给 dome 用）
+                sh.setFloatUniform("touchStrength", frame.press.coerceIn(0f, 1f))
+            }
+            currentFrame = next
         } catch (t: Throwable) {
             // uniform 名对不上等不该发生；真出问题就只是没有形变
         }
-    }
-
-    /** 程序化灰度噪声贴图（替代 Salt 的 haze_noise 资源）：固定种子，确定性、可复现。 */
-    private fun noiseTile(): BitmapShader {
-        val n = 96
-        val pixels = IntArray(n * n)
-        val rnd = java.util.Random(7)
-        for (i in pixels.indices) {
-            val g = rnd.nextInt(256)
-            pixels[i] = (0xFF shl 24) or (g shl 16) or (g shl 8) or g
-        }
-        val bmp = Bitmap.createBitmap(n, n, Bitmap.Config.ARGB_8888)
-        bmp.setPixels(pixels, 0, n, 0, 0, n, n)
-        return BitmapShader(bmp, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
     }
 }
 
@@ -691,10 +573,10 @@ class LiquidGlass {
  * 结构反转（关键）：**折射 RenderEffect 挂在整个内容层上**，shader 只在底栏矩形内
  * 做折射、矩形外逐像素直通 —— 于是 content 输入就是**整页真实内容**：从底栏下方
  * 滚过的文字 / 卡片会被真实弯折、色散（这就是「折射自己的文字」，不需要任何
- * 内容捕获 API —— 那个 API 在本工具链的 Compose 构件里不存在，见 LiquidGlass 头注释）。
+ * 内容捕获 API）。
  * 底栏 UI 层只负责：上报矩形、弹簧手势、染色与页签 —— 折射不发生在它身上。
  */
-class LiquidNavState {
+class LiquidNavState(val refractionAvailable: Boolean = false) {
     val motion = LiquidGlassMotion()
 
     /** 弹簧当前帧（引擎的 graphicsLayer 每帧读它更新 uniform，不触发重组）。 */
@@ -703,19 +585,19 @@ class LiquidNavState {
     /** 底栏在内容层（≈ 屏幕）里的矩形。UI 层上报，引擎消费。 */
     var barPos by mutableStateOf(Offset.Zero)
     var barSize by mutableStateOf(IntSize.Zero)
+
+    /** 只在新手势时唤醒弹簧；收敛后不再向 Choreographer 要帧。 */
+    var gestureId by mutableIntStateOf(0)
 }
 
 val LocalLiquidNav = staticCompositionLocalOf<LiquidNavState?> { null }
 
 /**
- * 内容层的折射引擎：整页过 AGSL（底栏矩形内折射 / 色散 / 透镜高光 + softLight 噪点），
- * 矩形外直通。只在 HIGH 档 + 着色器可用时挂 effect；否则原样返回（中低档位 / Robolectric）。
+ * 内容层的折射引擎：清晰折射 + 中心柔焦 → 与清晰原页合成。
+ * 模糊只在底栏内可见，图标和文字在独立前景层，始终保持清晰。
+ * 系统高斯模糊半径；不用稀疏采样网格，避免文字透底和重影。
  */
-/**
- * 高斯模糊半径。2026-10-25 决定**去掉模糊**（纯折射 / 色散 / 高光的透明玻璃）：
- * 设 0 时 shader 走直通采样，blur3 的 25-tap 路径零成本保留着，想再开改这一个值。
- */
-private val LiquidBlurRadius = 0.dp
+private val LiquidBlurRadius = 12.dp
 
 fun Modifier.liquidGlassRefraction(
     state: LiquidNavState,
@@ -753,8 +635,7 @@ private val LiquidNavHeight = 66.dp
  * 折射发生在 [liquidGlassRefraction]（挂在 App 的内容层上）；本组件只做：
  * - 上报自己的矩形给引擎（`LocalLiquidNav`）；
  * - Salt Player 的弹簧手势（按压 / 拖拽液滴形变 / 轻点回弹 —— 见文件头）；
- * - 玻璃的「存在感」：薄白染色 + squircle 亮边；页签 = Miuix 风格图标 + 小字，
- *   选中变主色，无滑动指示块；状态页签带模块健康徽标（8dp 圆点）；
+ * - 柔焦底色、柔和高光与渐变亮边；页签保留既有图标，选中变主色；
  * - 降级（API<33 / Robolectric / 编译失败）：莫奈扁卡底，页签行为不变。
  */
 @Composable
@@ -777,16 +658,14 @@ fun LiquidNavBar(
     }
 
     // 每帧弹簧积分（settle 后不写 frame）；只在引擎可用时驱动
-    val active = nav != null && quality == GlassQuality.HIGH
-    if (active && nav != null) {
-        LaunchedEffect(nav) {
+    val active = nav?.refractionAvailable == true && quality == GlassQuality.HIGH
+    if (active) {
+        LaunchedEffect(nav, nav.gestureId) {
             var last = 0L
-            while (true) {
+            while (!nav.motion.settled()) {
                 val now = withFrameNanos { it }
-                if (!nav.motion.settled()) {
-                    val dt = if (last == 0L) 0f else ((now - last) / 1_000_000_000f).coerceIn(0f, 0.05f)
-                    nav.frame = nav.motion.advance(dt)
-                }
+                val dt = if (last == 0L) 0f else ((now - last) / 1_000_000_000f).coerceIn(0f, 0.05f)
+                nav.frame = nav.motion.advance(dt)
                 last = now
             }
         }
@@ -803,7 +682,7 @@ fun LiquidNavBar(
             // 玻璃上的 UI 应用同一个 transform（kh1:420-435）：缩放锚在触点、
             // 非均匀缩放（液滴感）、整体被拖走一点 —— 和 shader 的 shapeScale 严格同步
             .graphicsLayer {
-                if (nav == null || nav.barSize.width <= 0) return@graphicsLayer
+                if (!active || nav.barSize.width <= 0) return@graphicsLayer
                 val w = nav.barSize.width.toFloat()
                 val h = nav.barSize.height.toFloat()
                 val t = glassTransformOf(nav.frame, w, h)
@@ -816,61 +695,103 @@ fun LiquidNavBar(
                 translationX = t.translationX
                 translationY = t.translationY
             }
+            .then(
+                if (quality != GlassQuality.LOW) Modifier.shadow(
+                    elevation = 12.dp,
+                    shape = RoundedCornerShape(RadiusR4),
+                    clip = false,
+                    ambientColor = Color.Black.copy(alpha = 0.06f),
+                    spotColor = Color.Black.copy(alpha = 0.10f),
+                ) else Modifier,
+            )
             .clip(RoundedCornerShape(RadiusR4))
             .pointerInput(active) {
                 if (!active) return@pointerInput
                 awaitEachGesture {
-                    val state = nav ?: return@awaitEachGesture
+                    val state = nav
                     val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                     val size = this.size
                     val downPos = down.position
                     val downFx = (downPos.x / size.width).coerceIn(0f, 1f)
                     val downFy = (downPos.y / size.height).coerceIn(0f, 1f)
                     state.motion.down(downFx, downFy)
+                    state.gestureId++
                     var dragged = false
                     var released = false
-                    while (!released) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        val change = event.changes.firstOrNull() ?: break
-                        if (change.position.isSpecified) {
-                            val dx = (change.position.x - downPos.x) / size.width
-                            val dy = (change.position.y - downPos.y) / size.height
-                            if (abs(dx) > 0.02f || abs(dy) > 0.02f) dragged = true
-                            if (dragged) {
-                                state.motion.move(
-                                    fx = (change.position.x / size.width).coerceIn(0f, 1f),
-                                    fy = (change.position.y / size.height).coerceIn(0f, 1f),
-                                    dragX = dx,
-                                    dragY = dy,
-                                )
-                            } else {
-                                state.motion.move(downFx, downFy, 0f, 0f)
+                    try {
+                        while (!released) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val change = event.changes.firstOrNull() ?: break
+                            if (change.position.isSpecified) {
+                                val dx = (change.position.x - downPos.x) / size.width
+                                val dy = (change.position.y - downPos.y) / size.height
+                                if (abs(dx) > 0.02f || abs(dy) > 0.02f) dragged = true
+                                if (dragged) {
+                                    state.motion.move(
+                                        fx = (change.position.x / size.width).coerceIn(0f, 1f),
+                                        fy = (change.position.y / size.height).coerceIn(0f, 1f),
+                                        dragX = dx,
+                                        dragY = dy,
+                                    )
+                                } else {
+                                    state.motion.move(downFx, downFy, 0f, 0f)
+                                }
                             }
+                            if (event.changes.none { it.pressed }) released = true
                         }
-                        if (event.changes.none { it.pressed }) released = true
+                    } finally {
+                        // 系统取消手势 / 离开页面也必须松手，不能让玻璃永久停在按压态。
+                        state.motion.release(dragged)
                     }
-                    // 轻点（没拖 + 按得浅）会多弹一下 —— vq1.m7901 的 velocity += 7
-                    state.motion.release(dragged)
                 }
             },
     ) {
         if (active) {
-            // 玻璃的「存在感」底：薄白染色（折射在内容层引擎里发生，这里不画内容）
+            // 染色和反光独立于背后的模糊，不会把导航图标一起模糊掉。
             Spacer(
                 Modifier.matchParentSize().background(
                     Brush.verticalGradient(
                         listOf(
-                            palette.glassTint.copy(alpha = if (palette.dark) 0.06f else 0.12f),
-                            palette.glassTint.copy(alpha = if (palette.dark) 0.03f else 0.06f),
+                            (if (palette.dark) palette.cardBg else Color.White).copy(alpha = if (palette.dark) 0.32f else 0.18f),
+                            (if (palette.dark) palette.cardBg else Color.White).copy(alpha = if (palette.dark) 0.20f else 0.08f),
                         ),
                     ),
                 ),
             )
-            // squircle 亮边：浅色下透镜高光的 screen blend 不可见，轮廓感靠这一圈
+            Spacer(
+                Modifier.matchParentSize().drawWithCache {
+                    // 宽而柔的反光光斑，使用连续渐变，不额外创建模糊离屏层。
+                    val topLight = Brush.radialGradient(
+                        listOf(Color.White.copy(alpha = if (palette.dark) 0.15f else 0.30f), Color.Transparent),
+                        center = Offset(size.width * 0.22f, -size.height * 0.65f),
+                        radius = size.width * 0.66f,
+                    )
+                    val bottomLight = Brush.radialGradient(
+                        listOf(Color.White.copy(alpha = if (palette.dark) 0.10f else 0.20f), Color.Transparent),
+                        center = Offset(size.width * 0.88f, size.height * 1.7f),
+                        radius = size.width * 0.46f,
+                    )
+                    onDrawBehind {
+                        drawRect(topLight)
+                        drawRect(bottomLight)
+                    }
+                },
+            )
             Spacer(
                 Modifier
                     .matchParentSize()
-                    .squircleBorder(1.dp, Color.White.copy(alpha = if (palette.dark) 0.28f else 0.55f), RadiusR4, 1f),
+                    .border(
+                        0.8.dp,
+                        Brush.linearGradient(
+                            listOf(
+                                Color.White.copy(alpha = if (palette.dark) 0.44f else 0.88f),
+                                Color.White.copy(alpha = 0.10f),
+                                palette.primary.copy(alpha = if (palette.dark) 0.16f else 0.12f),
+                                Color.White.copy(alpha = if (palette.dark) 0.28f else 0.64f),
+                            ),
+                        ),
+                        RoundedCornerShape(RadiusR4),
+                    ),
             )
         } else {
             // 降级：莫奈扁卡底 + 中性描边
@@ -884,7 +805,9 @@ fun LiquidNavBar(
         Row(
             Modifier
                 .fillMaxWidth()
-                .height(LiquidNavHeight),
+                .height(LiquidNavHeight)
+                .padding(horizontal = 6.dp)
+                .selectableGroup(),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -892,7 +815,7 @@ fun LiquidNavBar(
                 NavTabItem(
                     tab = t,
                     selected = index == tab,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
                     onClick = { onTab(index) },
                 )
             }
@@ -913,16 +836,24 @@ private fun NavTabItem(
     val haptics = LocalHapticFeedback.current
     // 0 → 1 的选中进度：图标缩放 / 变色 / 字重跟着走，切换有连续感
     val p by animateFloatAsState(if (selected) 1f else 0f, tween(240))
-    val tint = lerp(palette.sub, palette.primary, p)
+    val tint = lerp(lerp(palette.sub, palette.text, 0.28f), palette.primary, p)
     val interaction = remember { MutableInteractionSource() }
 
     Column(
         modifier
             .clip(RoundedCornerShape(RadiusR3))
             // 自带选中态了，不要涟漪 —— 否则会闪出和玻璃不搭的方块
-            .clickable(interactionSource = interaction, indication = null) {
+            .selectable(selected = selected, role = Role.Tab, interactionSource = interaction, indication = null) {
                 if (!selected) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                 onClick()
+            }
+            .drawBehind {
+                drawRoundRect(
+                    color = palette.primary.copy(alpha = (if (palette.dark) 0.14f else 0.08f) * p),
+                    topLeft = Offset(3.dp.toPx(), 7.dp.toPx()),
+                    size = Size((size.width - 6.dp.toPx()).coerceAtLeast(0f), (size.height - 14.dp.toPx()).coerceAtLeast(0f)),
+                    cornerRadius = CornerRadius(22.dp.toPx()),
+                )
             }
             .graphicsLayer {
                 val scale = 0.94f + 0.06f * p
@@ -936,16 +867,18 @@ private fun NavTabItem(
     ) {
         Icon(
             tab.icon,
-            contentDescription = tab.label,
+            contentDescription = null,
             tint = tint,
             modifier = Modifier.size(22.dp + 2.dp * p),
         )
         Spacer(Modifier.height(3.dp))
         Text(
             tab.label,
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             color = tint,
             fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
