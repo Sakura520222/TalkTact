@@ -32,6 +32,7 @@ object Backup {
         c["model"] = str(cfg.model)
         c["prompt"] = str(cfg.prompt)
         c["enabled"] = bool(cfg.enabled)
+        c["qqEnabled"] = bool(cfg.qqEnabled)
         c["ctx"] = num(cfg.ctx)
         c["temperature"] = num(cfg.temperature)
         c["maxTokens"] = num(cfg.maxTokens)
@@ -67,7 +68,8 @@ object Backup {
         val root = Json.parse(text).asObj() ?: return null
         val c = root["config"].asObj() ?: return null
 
-        var cfg = current
+        // QQ 的启用必须在备份中明确存在；旧备份不能携带这项新增宿主授权。
+        var cfg = current.copy(qqEnabled = c["qqEnabled"].asBool() ?: false)
         c["baseUrl"].asStr()?.takeIf { it.isNotBlank() }?.let { cfg = cfg.copy(baseUrl = it) }
         c["apiKey"].asStr()?.takeIf { it.isNotBlank() }?.let { cfg = cfg.copy(apiKey = it) }
         c["model"].asStr()?.takeIf { it.isNotBlank() }?.let { cfg = cfg.copy(model = it) }

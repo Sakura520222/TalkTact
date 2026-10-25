@@ -1,7 +1,11 @@
 import java.util.Properties
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
+    // gradle.properties 里 android.builtInKotlin=false —— 用传统 KGP（版本在根 build.gradle.kts，
+    // 2.4.20），否则内置 Kotlin 2.2.10 读不了 Miuix 0.9.4 的 metadata 2.4.0
+    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -31,8 +35,8 @@ android {
         applicationId = "io.github.shibry88_netizen.talktact"
         minSdk = 31  // Android 12+：液态玻璃的真实背景模糊走 RenderEffect
         targetSdk = 34
-        versionCode = 40
-        versionName = "0.8.12-fork.1"
+        versionCode = 41
+        versionName = "0.9.0"
 
         /**
          * 只打包 arm64-v8a（0.8.10 起）。
@@ -77,6 +81,13 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    // 传统 KGP（android.builtInKotlin=false）不会自动跟随上面的 compileOptions，
+    // 不显式对齐会报「Inconsistent JVM Target Compatibility Between Java and Kotlin Tasks」
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+        }
+    }
     // AGP 内置 Kotlin 的 JVM target 跟随上面的 targetCompatibility（17）。
     buildFeatures { compose = true }
     packaging {
@@ -99,6 +110,9 @@ tasks.configureEach {
 dependencies {
     // 注入到微信进程里的那部分（config/llm/wechat）刻意只用系统 API + kotlin stdlib，
     // 不引 OkHttp / 序列化库 —— 免得和微信自带的同名库撞车（parent-first 类加载会拿到它那份）。
+    // ⚠️ 不能升到 2026.x（compose ui 1.12）：那一代重构掉了 androidx.compose.ui.graphics.layer
+    // 包，rememberGraphicsLayer / GraphicsLayer.record / drawLayer 没了，而液态玻璃底栏的
+    // 内容捕获（Haze 式）靠它们。miuix 0.9.4 自己声明的 ui 依赖就是 1.6.0，在 1.7.1 上二进制兼容。
     implementation(platform("androidx.compose:compose-bom:2024.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
@@ -108,6 +122,11 @@ dependencies {
     implementation("androidx.compose.animation:animation")
     implementation("androidx.activity:activity-compose:1.9.2")
     implementation("androidx.core:core-ktx:1.13.1")
+
+    // Miuix（HyperOS 风格）主题与组件：top.yukonga.miuix.kmp 的 Android 变体。
+    // 只用于 App 进程的 Compose 界面，注入微信侧的代码绝不引用它。
+    // 前置条件（2026-10 已满足）：Kotlin 2.4.20（读 metadata 2.4.0）、daemon JDK 21（字节码 class v65）。
+    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.4")
 
     // 「每天中午 12:00 提炼说话风格」用它的周期任务：App 没开、手机重启过都照跑，
     // 也不必申请精确闹钟权限（AlarmManager 那条路 Android 12+ 要额外权限）

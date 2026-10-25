@@ -28,6 +28,7 @@ object RemoteSync {
 
     @Volatile
     private var remote: SharedPreferences? = null
+    @Volatile private var scopeService: XposedService? = null
 
     /** 框架是否已经把 service 交到本进程手上。 */
     @Volatile
@@ -47,7 +48,10 @@ object RemoteSync {
         if (key != null) {
             push(key)
             // 代理开关一变，「Key 要不要推给注入侧」也跟着变 —— 得补推一次 api_key
-            if (key == Keys.PROXY_ON) push(Keys.KEY)
+            if (key == Keys.PROXY_ON) {
+                push(Keys.KEY)
+                push(Keys.KEY2)
+            }
         }
     }
 
@@ -55,6 +59,7 @@ object RemoteSync {
         override fun onServiceBind(service: XposedService) {
             try {
                 remote = service.getRemotePreferences(PREF_NAME)
+                scopeService = service
                 bound = true
                 lastError = null
                 Log.i(TAG, "[Goutou] 已连上 Xposed 服务，开始镜像配置")
@@ -62,6 +67,7 @@ object RemoteSync {
             } catch (t: Throwable) {
                 bound = false
                 remote = null
+                scopeService = null
                 lastError = "getRemotePreferences 失败：$t"
                 Log.w(TAG, "[Goutou] $lastError")
             }
@@ -70,6 +76,7 @@ object RemoteSync {
         override fun onServiceDied(service: XposedService) {
             bound = false
             remote = null
+            scopeService = null
             Log.w(TAG, "[Goutou] Xposed 服务已断开（配置改动会先记在本地，等服务回来再补）")
         }
     }
@@ -110,7 +117,31 @@ object RemoteSync {
     fun syncAll() {
         val ctx = appContext ?: return
         if (remote == null) return
-        for (key in local(ctx).all.keys) push(key)
+        // 旧本地配置没有 QQ 开关时也镜像 false，不能沿用框架中可能残留的旧授权。
+        for (key in local(ctx).all.keys + setOf(Keys.QQ_ENABLED, Keys.KEY, Keys.KEY2)) push(key)
+    }
+
+    /** 仅请求用户启用的 QQ，不扩大到其他包；由框架完成确认。 */
+    fun requestQqScope(result: (Boolean, String) -> Unit) {
+        val service = scopeService
+        if (service == null) { result(false, "未连接框架，请在框架作用域中勾选 QQ"); return }
+        try {
+            if ("com.tencent.mobileqq" in service.scope) {
+                result(true, "QQ 作用域已启用，重启 QQ 后生效")
+                return
+            }
+            service.requestScope(listOf("com.tencent.mobileqq"), object : XposedService.OnScopeEventListener {
+                override fun onScopeRequestApproved(approved: MutableList<String>) {
+                    val granted = "com.tencent.mobileqq" in approved
+                    result(granted, if (granted) "作用域已更新，重启 QQ 后生效" else "QQ 未获授权，请在框架中勾选")
+                }
+                override fun onScopeRequestFailed(message: String) {
+                    result(false, "框架未授权 QQ，请在框架管理器中勾选")
+                }
+            })
+        } catch (_: Throwable) {
+            result(false, "当前框架不支持直接申请，请在作用域中勾选 QQ")
+        }
     }
 
     private fun local(ctx: Context): SharedPreferences =
@@ -120,11 +151,15 @@ object RemoteSync {
         val p = remote ?: return
         val ctx = appContext ?: return
         try {
-            val value = local(ctx).all[key] ?: return
+            val value = local(ctx).all[key] ?: when (key) {
+                Keys.QQ_ENABLED -> false
+                Keys.KEY, Keys.KEY2 -> ""
+                else -> return
+            }
             // 开了本地代理 → API Key 绝不外推到注入进程。
             // 注入侧这时拿到的是空串，它改用 proxyToken 请求 127.0.0.1 上的代理 —— 这就是
             // 「Key 不出 App 进程」的实现方式：不是加密，而是**根本不给**。
-            if (key == Keys.KEY && local(ctx).getBoolean(Keys.PROXY_ON, false)) {
+            if ((key == Keys.KEY || key == Keys.KEY2) && local(ctx).getBoolean(Keys.PROXY_ON, false)) {
                 p.edit().putString(key, "").apply()
                 return
             }

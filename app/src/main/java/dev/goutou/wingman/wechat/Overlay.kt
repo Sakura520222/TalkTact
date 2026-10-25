@@ -11,6 +11,9 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.graphics.Typeface
+import android.text.TextUtils
+import android.widget.ScrollView
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -40,12 +43,17 @@ internal object PanelRegistry {
     private val panels = java.util.WeakHashMap<Activity, Panel>()
 
     fun onResume(activity: Activity) {
+        if (ChatHost.fromPackage(activity.packageName) == null || activity.isFinishing || activity.isDestroyed) return
         val existing = panels[activity]
         if (existing != null) existing.onResume() else panels[activity] = Panel(activity).also { it.onResume() }
     }
 
     fun onPause(activity: Activity) {
         panels[activity]?.onPause()
+    }
+
+    fun onDestroy(activity: Activity) {
+        panels.remove(activity)?.onDestroy()
     }
 }
 
@@ -68,6 +76,7 @@ internal object PanelRegistry {
  */
 internal class Panel(private val a: Activity) {
 
+    private val host = requireNotNull(ChatHost.fromPackage(a.packageName))
     private val reader = ViewReader(a)
     private val parser = ChatParser(a.resources.displayMetrics.widthPixels)
     /** 图片文字识别：把行里的图送去 App 认字（同一张图只发一次，认不出来回落成占位）。 */
@@ -85,23 +94,16 @@ internal class Panel(private val a: Activity) {
     private val night = (a.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
         Configuration.UI_MODE_NIGHT_YES
 
-    /**
-     * 微信里这张卡片的底色 —— 和 App 里是同一套玻璃语义：**半透明 + 一道边**。
-     *
-     * 浅色场景从「白 0.95」改成**白 0.72**：以前那块近乎不透明的白压在聊天背景上，
-     * 跟 App 里被吐槽的「一圈玻璃围着一块白板」是同一个毛病。深色场景本来就够暗，维持原值。
-     */
-    private val colorCard = if (night) 0xF21B1A22.toInt() else 0xB8FFFFFF.toInt()
-    private val colorStroke = if (night) 0x557C3AED.toInt() else 0x447C3AED.toInt()
-    private val colorMain = if (night) 0xFFEDEAF5.toInt() else 0xFF1C1B22.toInt()
-    private val colorSub = if (night) 0xFF9A96A8.toInt() else 0xFF6E6A7C.toInt()
-    private val colorReply = if (night) 0xFF2A2440.toInt() else 0xFFEDE7FA.toInt()
-    private val colorAccent = 0xFF7C3AED.toInt()
-    private val colorWarn = 0xFFE8A317.toInt()
-    /** 「中」当实底用的深一档琥珀（白字压在上面要够对比）。 */
-    private val colorWarnSolid = 0xFFC97A00.toInt()
-    private val colorBad = 0xFFD64545.toInt()
-    private val colorOk = 0xFF2FA566.toInt()
+    private val palette = OverlayPalette.resolve(a)
+    private val colorStroke = palette.stroke
+    private val colorMain = palette.text
+    private val colorSub = palette.sub
+    private val colorReply = palette.reply
+    private val colorAccent = palette.accent
+    private val colorWarn = palette.warn
+    private val colorWarnSolid = 0xFF8A5A00.toInt()
+    private val colorBad = palette.bad
+    private val colorOk = palette.ok
     /**
      * 风险等级 → 语义色（**唯一一份**映射）。
      *
@@ -110,7 +112,10 @@ internal class Panel(private val a: Activity) {
      */
     private val riskMap = mapOf("低" to colorOk, "中" to colorWarn, "高" to colorBad)
 
-    private val card = LinearLayout(a)
+    private val card = OverlayGlassSurface(a)
+    private val chipSurface = OverlayGlassSurface(a)
+    private var backdropAllowed = false
+    private var qqActivated = false
     private val title = TextView(a)
     private val bodyBox = LinearLayout(a)
     private val chip = TextView(a)
@@ -140,6 +145,7 @@ internal class Panel(private val a: Activity) {
      * （换掉了原来那个 force —— 名字说不清它是干嘛的，而且读它的人得自己猜。）
      */
     private var recheck = false
+    private val manualSession = ManualRecognitionSession()
     private var generation = 0
     private var cardTop = -1
     private var lastCallAt = 0L
@@ -176,9 +182,6 @@ internal class Panel(private val a: Activity) {
     /** 标题抖动保护：候选新标题 + 它连续出现了几轮（见 tick 里那段）。 */
     private var pendingName = ""
     private var pendingNameTicks = 0
-    /** 抖动保护计数：机器自己在一段时间内改了几次折叠状态（用户点的不算）。 */
-    private var autoToggles = 0
-    private var autoToggleAt = 0L
     /** 上一轮的设置指纹四个分组：用来在轨迹里指出是哪一组在抖。 */
     private var lastSettingsGroups: List<String> = emptyList()
     /**
@@ -288,6 +291,8 @@ internal class Panel(private val a: Activity) {
             return
         }
         running = true
+        card.resumeBackdrop()
+        chipSurface.resumeBackdrop()
         lastScreenFingerprint = ""
         inputRef = null
         listRef = null
@@ -300,6 +305,23 @@ internal class Panel(private val a: Activity) {
         if (expanded) Trace.note("卡片", "收起（微信这一页暂停 / 切走）")
         handler.removeCallbacks(ticker)
         resetPanel()
+        ocr.cancelPending()
+        card.pauseBackdrop()
+        chipSurface.pauseBackdrop()
+    }
+
+    fun onDestroy() {
+        running = false
+        generation++
+        handler.removeCallbacksAndMessages(null)
+        ocr.close()
+        card.releaseBackdrop()
+        chipSurface.releaseBackdrop()
+        (card.parent as? ViewGroup)?.removeView(card)
+        (chipSurface.parent as? ViewGroup)?.removeView(chipSurface)
+        cache.clear()
+        lastMsgs = emptyList()
+        attached = false
     }
 
     // ---------------- 视图 ----------------
@@ -307,60 +329,115 @@ internal class Panel(private val a: Activity) {
     private fun attach() {
         val decor = a.window?.decorView as? ViewGroup ?: return
 
+        allowBackdrop(false)
+        // 重挂时旧 header / ScrollView 仍持有复用子 View，必须先摘除再加入新容器。
+        for (reused in arrayOf<View>(title, bodyBox, chip)) {
+            (reused.parent as? ViewGroup)?.removeView(reused)
+        }
+        card.removeAllViews()
+        chipSurface.removeAllViews()
         card.orientation = LinearLayout.VERTICAL
-        card.background = roundRect(colorCard, 20, colorStroke)
-        card.setPadding(dp(14), dp(10), dp(14), dp(10))
+        card.setPadding(dp(16), dp(10), dp(16), dp(12))
         card.elevation = dp(8).toFloat()
         card.visibility = View.GONE
+        card.contentDescription = "TalkTact 回复浮窗"
 
         val head = LinearLayout(a).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(48)
         }
-        title.textSize = 13f
-        title.setTextColor(colorAccent)
-        // 长按标题：把当前 View 树结构写成诊断（App 首页可复制，日志里也有一份）
-        title.setOnLongClickListener {
-            a.window?.decorView?.let { decor -> dumpDiagnosis(decor, listRef, inputRef, "手动诊断", manual = true) }
-            toast("诊断已写入：App 首页「诊断」卡片可复制，或看 LSPosed 日志 [Goutou]")
-            true
-        }
-        val refresh = label("↻ 重新识别", 12f, 0xFFFFFFFF.toInt()) {
-            background = roundRect(colorAccent, 14)
-            setPadding(dp(10), dp(4), dp(10), dp(4))
-        }
+        title.textSize = 16f
+        title.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        title.setTextColor(colorMain)
+        title.gravity = Gravity.CENTER_VERTICAL
+        title.maxLines = 1
+        title.ellipsize = TextUtils.TruncateAt.END
+        title.setOnLongClickListener { saveDiagnosis(); true }
+        val diagnostics = actionLabel("诊断", colorSub)
+        diagnostics.setOnClickListener { saveDiagnosis() }
+        val refresh = actionLabel("识别", colorAccent)
+        refresh.contentDescription = "重新识别"
         refresh.setOnClickListener { regenerate() }
-        // 收起：只是折回小按钮，不拉黑这一条 —— 再点按钮随时能打开
-        val collapse = label("▾", 16f, colorSub) { setPadding(dp(12), 0, 0, 0) }
-        collapse.setOnClickListener { setExpanded(false, "用户点卡片右上角 ▾", byUser = true) }
-        head.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        val collapse = actionLabel("⌄", colorSub)
+        collapse.contentDescription = "收起浮窗"
+        collapse.setOnClickListener { setExpanded(false, "用户收起", byUser = true) }
+        head.addView(title, LinearLayout.LayoutParams(0, dp(48), 1f))
+        head.addView(diagnostics)
         head.addView(refresh)
         head.addView(collapse)
 
         bodyBox.orientation = LinearLayout.VERTICAL
+        val scroll = object : ScrollView(a) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val maxHeight = minOf(dp(360), (resources.displayMetrics.heightPixels * 0.48f).toInt())
+                super.onMeasure(widthMeasureSpec, View.MeasureSpec.makeMeasureSpec(maxHeight, View.MeasureSpec.AT_MOST))
+            }
+        }.apply {
+            isFillViewport = false
+            isVerticalScrollBarEnabled = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+            addView(bodyBox, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        }
         card.addView(head)
-        card.addView(bodyBox)
+        card.addView(scroll)
 
-        chipText = "↻ 识别"
+        chipText = "军师"
         chip.text = chipText
         chip.textSize = 13f
-        chip.setTextColor(0xFFFFFFFF.toInt())
-        chip.setPadding(dp(14), dp(8), dp(14), dp(8))
-        chip.background = roundRect(0xE67C3AED.toInt(), 18)
-        chip.elevation = dp(6).toFloat()
-        chip.visibility = View.GONE
+        chip.setTextColor(colorAccent)
+        chip.maxLines = 1
+        chip.maxWidth = dp(250)
+        chip.ellipsize = TextUtils.TruncateAt.END
+        chip.gravity = Gravity.CENTER
+        chip.minHeight = dp(44)
+        chip.setPadding(dp(16), dp(8), dp(16), dp(8))
+        chip.background = null
         chip.setOnClickListener { onChipClick() }
-
-        // 打标记：ViewReader 遍历时会整棵跳过我们自己的浮层（见 OVERLAY_TAG 的说明）
+        chipSurface.addView(chip)
+        chipSurface.visibility = View.GONE
+        chipSurface.elevation = dp(6).toFloat()
         card.tag = OVERLAY_TAG
-        chip.tag = OVERLAY_TAG
-        decor.addView(card, matchTop(dp(10), dp(96), dp(10)))
-        decor.addView(chip, wrapTopEnd(dp(10), dp(96)))
+        chipSurface.tag = OVERLAY_TAG
+        decor.addView(card, matchTop(dp(14), dp(96), dp(14)))
+        decor.addView(chipSurface, wrapTopEnd(dp(14), dp(96)))
+        card.bindHost(decor)
+        chipSurface.bindHost(decor)
+        card.resumeBackdrop()
+        chipSurface.resumeBackdrop()
+        updateGlassStyle()
         // 探测轮询从这里起步（**刻意不放在 onResume**）：微信切到后台时 ticker 是停的，
         // 但微信进程还活着 —— 探测挂在 ticker 上就会得到「没回应」的假警报。
         handler.removeCallbacks(prober)
-        handler.postDelayed(prober, PROBE_POLL_MS)
+        if (host == ChatHost.WECHAT) handler.postDelayed(prober, PROBE_POLL_MS)
         attached = true
+    }
+
+    private fun actionLabel(text: String, color: Int): TextView = label(text, 12f, color) {
+        gravity = Gravity.CENTER
+        minWidth = dp(44)
+        minHeight = dp(44)
+        setPadding(dp(8), 0, dp(8), 0)
+        isClickable = true
+    }
+
+    private fun saveDiagnosis() {
+        a.window?.decorView?.let { decor -> dumpDiagnosis(decor, listRef, inputRef, "手动诊断", manual = true,
+            extra = "card: ${card.reportState()}\nchip: ${chipSurface.reportState()}\n" + reader.describeTitleCandidates(decor, listRef)) }
+        toast("诊断已保存，可在 App 的诊断页查看")
+    }
+
+    private fun updateGlassStyle() {
+        val cfg = config
+        for (surface in arrayOf(card, chipSurface)) {
+            surface.updateStyle(cfg?.glassQuality ?: "auto", cfg?.glassAlpha ?: 0.92f, 12f)
+        }
+    }
+
+    private fun allowBackdrop(allowed: Boolean) {
+        backdropAllowed = allowed
+        card.setBackdropAllowed(allowed && running && expanded && onChat)
+        chipSurface.setBackdropAllowed(allowed && running && !expanded && onChat)
     }
 
     private fun label(text: String, size: Float, color: Int, style: TextView.() -> Unit = {}): TextView =
@@ -394,13 +471,13 @@ internal class Panel(private val a: Activity) {
             list.getLocationOnScreen(listLoc)
             val decorLoc = IntArray(2)
             decor.getLocationOnScreen(decorLoc)
-            maxOf(inset + dp(40), listLoc[1] - decorLoc[1] + dp(4))
+            maxOf(inset + dp(64), listLoc[1] - decorLoc[1] + dp(4))
         } else {
             inset + dp(80)
         }
         if (target == cardTop) return
         cardTop = target
-        for (v in arrayOf<View>(card, chip)) {
+        for (v in arrayOf<View>(card, chipSurface)) {
             val lp = v.layoutParams as? FrameLayout.LayoutParams ?: continue
             lp.topMargin = target
             v.layoutParams = lp
@@ -426,13 +503,27 @@ internal class Panel(private val a: Activity) {
 
         // 配置文件变了就地重读。提到最前面：下面几个早退分支都依赖它，尤其是「手动抓取」。
         refreshPrefs()
+        updateGlassStyle()
+        val enabled = config
+        if (host == ChatHost.QQ && enabled?.qqEnabled != true) {
+            qqActivated = false
+            hideAll("QQ 浮窗未启用")
+            return
+        }
+        if (host == ChatHost.QQ && !qqActivated) {
+            // 不把启用 QQ 之前遗留的微信诊断 / 联系人请求带入新宿主。
+            lastDiagReq = prefs?.getLong(Keys.DIAG_REQ, 0L) ?: 0L
+            lastConvReq = prefs?.getLong(Keys.CHAT_REQ, 0L) ?: 0L
+            convReqAck = lastConvReq
+            qqActivated = true
+        }
 
         // App 里点了「抓当前微信界面」→ 把当前页面结构 dump 回去。
         // 刻意排在**所有**判定之前（包括 hasWindowFocus）：
         // 出问题的那几个聊天页可能是在下面任意一个分支提前 return 的，而诊断入口原本是长按卡片标题 ——
         // 卡片都不弹，那个入口根本够不着；连「窗口没焦点」这种原因也要能抓到证据。
         val req = prefs?.getLong(Keys.DIAG_REQ, 0L) ?: 0L
-        if (req > lastDiagReq) {
+        if (host == ChatHost.WECHAT && req > lastDiagReq) {
             lastDiagReq = req
             Trace.note("抓取", "App 点了「抓当前微信界面」→ 手动 dump 结构（连带这份轨迹一起回传）")
             val in0 = reader.findChatInput(decor)
@@ -455,6 +546,7 @@ internal class Panel(private val a: Activity) {
         maybeAnswerProbe()
 
         if (!decor.hasWindowFocus()) {
+            allowBackdrop(false)
             // 没焦点通常什么都不做 —— 但「有些对话连气泡都不出现」就是从这类早退里溜走的。
             // 只要这一屏**像**聊天页就留一个能点的按钮（宁松勿紧，见 [chatPageEvidence]）。
             val why = chatPageEvidence(reader.findInputCandidate(decor), decor, cheap = true)
@@ -478,6 +570,7 @@ internal class Panel(private val a: Activity) {
             reader.findChatInput(decor)?.also { inputRef = it }
         }
         if (input == null) {
+            allowBackdrop(false)
             // 以前这里直接 hideAll() 就结束，于是「这几个聊天页为什么连卡片都不弹」永远查不出来。
             // 现在只要屏幕上还有「像输入框」的控件，就把结构 dump 回去（30s 限流）。
             val cand0 = reader.findInputCandidate(decor)
@@ -511,6 +604,11 @@ internal class Panel(private val a: Activity) {
                         "或者这一屏的控件太多、没扫到输入框。\n" +
                         "（判断依据：$why）长按标题可以再生成一份诊断。",
                 )
+                val visibleList = reader.findList(decor, null)
+                val visibleName = host.conversationKey(reader.findChatTitle(decor, visibleList).orEmpty())
+                val current = config
+                allowBackdrop(current != null && visibleName.isNotBlank() && !chatBlocked(current.whitelistEnabled, current.whitelist, visibleName))
+                place(visibleList)
             } else {
                 Trace.note("兜底", "既没有输入框也没有消息列表，Activity=${a.javaClass.simpleName} → 整块藏起来")
                 hideAll("不是聊天页（没有输入框、也没有消息列表）")
@@ -524,11 +622,6 @@ internal class Panel(private val a: Activity) {
             return
         }
         val cfg = config ?: return
-        if (!cfg.enabled) {
-            Trace.note("开关", "总开关关着（设置 → 微信内自动分析）→ 这一页什么都不做")
-            hideAll("总开关关着")
-            return
-        }
         // 从别的页面切回来时，指纹没变会提前 return —— 这里先把按钮的可见性对一遍，
         // 免得「出去转一圈回来，按钮再也不出现了」。
         applyVisibility()
@@ -556,8 +649,7 @@ internal class Panel(private val a: Activity) {
                 if (recheck || noListTicks == 2) {
                     recheck = false
                     showMessage(
-                        "没找到消息列表（微信版本可能改了控件类型）。\n" +
-                            "诊断已保存到 App 首页，长按标题可再次生成。",
+                        "暂未找到消息列表，请重新进入聊天。",
                         isError = true,
                     )
                 }
@@ -568,7 +660,7 @@ internal class Panel(private val a: Activity) {
 
         // A reused Activity can host different conversations with identical last messages.
         // Resolve the title before every content fast-path; a missing title never inherits the old name.
-        val observedRawName = Roles.normalizeKey(reader.findChatTitle(decor, list).orEmpty())
+        val observedRawName = host.conversationKey(reader.findChatTitle(decor, list).orEmpty())
         // 微信切换布局时标题控件可能短暂读空。已有会话遇到这个瞬态时，
         // 保留当前上下文并等待下一轮，不能把它当成新会话清掉展开结果。
         //
@@ -576,17 +668,18 @@ internal class Panel(private val a: Activity) {
         //    于是面板永远拿着上一个会话的名字，把上一个窗口的内容当成这一屏的 —— 这就是 issue #6
         //    （用户原话「模块读取内容还为上一个窗口的内容」）。连续几轮都读不到就认输。
         if (observedRawName.isBlank() && chatName.isNotBlank()) {
+            invalidateUncertainContext()
             blankTitleTicks++
             if (blankTitleTicks < BLANK_TITLE_MAX_TICKS) {
                 Trace.note(
                     "标题",
-                    "会话标题暂时为空，保留「$chatName」并等待下一轮（$blankTitleTicks/$BLANK_TITLE_MAX_TICKS）",
+                    "会话标题暂时为空，保留「${conversationDisplayName(chatName)}」并等待下一轮（$blankTitleTicks/$BLANK_TITLE_MAX_TICKS）",
                 )
                 return
             }
             Trace.note(
                 "标题",
-                "连续 $blankTitleTicks 轮读不到会话标题 → 不再沿用「$chatName」" +
+                "连续 $blankTitleTicks 轮读不到会话标题 → 不再沿用「${conversationDisplayName(chatName)}」" +
                     "（否则会把上一个窗口的内容当成这一屏的）",
             )
             blankTitleTicks = 0
@@ -614,8 +707,10 @@ internal class Panel(private val a: Activity) {
                 pendingNameTicks = 1
             }
             if (pendingNameTicks < 2 && chatName.isNotBlank()) {
-                Trace.note("标题", "读到新标题「$observedName」但只出现一轮 → 当作抖动，这一轮仍按「$chatName」处理")
-                observedName = chatName
+                Trace.note("标题", "读到新标题「$observedName」但只出现一轮 → 当作抖动，这一轮仍按「${conversationDisplayName(chatName)}」处理")
+                invalidateUncertainContext()
+                showStuck("军师 · 切换中", "正在切换会话，请稍候。")
+                return
             }
         } else {
             pendingName = ""
@@ -623,15 +718,7 @@ internal class Panel(private val a: Activity) {
         }
         // 设置指纹拆成四组（跟高级设置的分组分法一致）：万一它还在抖，轨迹里能直接说是哪一组，
         // 不用再猜「设置 / 档案 / 说话风格之一」到底是哪个（这一条就是靠用户那份轨迹才定位的）。
-        val settingsGroups = listOf(
-            conversationDigest(cfg.prompt, cfg.model, cfg.baseUrl, cfg.apiKey, cfg.model2, cfg.baseUrl2, cfg.apiKey2),
-            conversationDigest(
-                cfg.graded.toString(), cfg.temperature.toString(), cfg.maxTokens.toString(),
-                cfg.jsonMode.toString(), cfg.ctx.toString(), cfg.allowSensitive.toString(),
-            ),
-            conversationDigest(cfg.whitelistEnabled.toString(), cfg.whitelist.sorted().toString()),
-            conversationDigest(cfg.proxyEnabled.toString(), cfg.proxyPort.toString(), cfg.proxyToken),
-        )
+        val settingsGroups = requestSettingGroups(cfg)
         val settings = conversationDigest(*settingsGroups.toTypedArray())
         // 「要不要重置这一屏」**只看两件事**：这是不是同一个会话（名字）+ 设置有没有改。
         //
@@ -643,7 +730,10 @@ internal class Panel(private val a: Activity) {
         // 而且刻意不让它使缓存失效（档案长一条不该重新烧一次 token）。
         val revision = conversationDigest(observedName, settings)
         if (revision != contextRevision) {
+            if (contextRevision.isNotBlank()) { manualSession.finish(); recheck = false; ocr.cancelPending() }
+            clearSensitiveApproval()
             val anotherChat = observedName != chatName
+            if (anotherChat && chatName.isNotBlank()) { manualSession.finish(); recheck = false; ocr.cancelPending() }
             val prevGroups = lastSettingsGroups
             lastSettingsGroups = settingsGroups
             generation++ // Discard replies and rewrites started for the previous conversation or profile.
@@ -682,11 +772,28 @@ internal class Panel(private val a: Activity) {
             if (anotherChat) setExpanded(false, "换了会话")
             showIdle()
         }
+        allowBackdrop(!blockedByWhitelist(cfg) && chatName.isNotBlank())
+        if (host == ChatHost.QQ && chatName.isBlank()) {
+            manualSession.finish()
+            showStuck("军师 · 待识别", "暂未识别到会话名，请重新进入聊天。")
+            return
+        }
+        if (overlayManualOnly(host == ChatHost.QQ, cfg.enabled) && !manualSession.pending && !blockedByWhitelist(cfg)) {
+            if (body != Body.Result && body != Body.Sensitive && body != Body.Thinking) {
+                showMessage("点击「识别」生成回复建议。")
+            }
+            return
+        }
         // 指纹只由「看得见的内容 + 这一屏的身份」决定。
         // 以前还塞了 historyRevision（整份角色档案的 digest）：那是**每 tick 对最多 400 条记录算一次哈希**，
         // 而且档案每长一句话就被当成「这一屏变了」→ 缓存必 miss、在飞的请求被作废。
         // 「档案变了要不要重新问」是 ask() 那一刻用 roleContext 决定的事，不该让「这一屏变没变」跟着抖。
         val fingerprint = conversationDigest(observedName, reader.fingerprint(list), revision)
+        if (overlayManualOnly(host == ChatHost.QQ, cfg.enabled) && manualSession.pending && !manualSession.bind(fingerprint)) {
+            ocr.cancelPending()
+            showMessage("消息已更新，请重新识别。")
+            return
+        }
         if (!recheck && !ocr.takeDirty() && fingerprint == lastScreenFingerprint) {
             Trace.note("跳过", "会话、资料和这一屏未变，不重复读")
             return
@@ -701,13 +808,15 @@ internal class Panel(private val a: Activity) {
         // 跟解析没关系，所以这道闸完全可以提前，白名单外的会话连图都不会被送去认字。
         // 认出来的名字照旧回传当候选（否则「白名单开着时打开过就会出现在候选里」会失效）。
         if (blockedByWhitelist(cfg)) {
+            allowBackdrop(false)
+            ocr.cancelPending()
             rememberChatName(chatName)
             Trace.note(
                 "白名单",
                 if (chatName.isBlank()) {
                     "白名单开着，但这个会话的名字没认出来 → 拦下（宁可不读，也不猜；连图都不认）"
                 } else {
-                    "会话「$chatName」不在白名单里 → 不分析，也不认图"
+                    "会话「${conversationDisplayName(chatName)}」不在白名单里 → 不分析，也不认图"
                 },
             )
             setChip(if (chatName.isBlank()) "白名单 · 认不出会话名" else "白名单外 · 未启用")
@@ -729,7 +838,7 @@ internal class Panel(private val a: Activity) {
                         "白名单开着，但这个会话的名字没认出来 → 先不分析。\n" +
                             "要在这里用：去「设置 → 高级设置 → 会话白名单」按名字手动加一个。"
                     } else {
-                        "「$chatName」不在白名单里 —— 按你的设置，这一屏不分析。\n" +
+                        "「${conversationDisplayName(chatName)}」不在白名单里 —— 按你的设置，这一屏不分析。\n" +
                             "想让它工作就把它加进白名单；想全都分析，把白名单开关关掉。"
                     },
                     chip = if (chatName.isBlank()) "白名单 · 认不出会话名" else "白名单外 · 未启用",
@@ -751,6 +860,7 @@ internal class Panel(private val a: Activity) {
             setChip("正在认图…")
             return
         }
+        manualSession.finish()
         // 到这儿每张图都已经有确定结果了（认到的文字 / 确实没字 / 失败冷却），解析只是个纯查询
         val msgs = parser.parse(rows) { img -> ocr.textOf(img) }.takeLast(cfg.ctx)
         // 「这一屏」的稳定键：只跟**看得见的内容**有关（纯函数，单测见 ConversationStateTest）。
@@ -785,14 +895,12 @@ internal class Panel(private val a: Activity) {
                 Trace.note("空", "选到了消息列表，但一条文字都没解析出来（正文可能是自绘控件）")
                 dumpDiagnosis(decor, list, input, "选到了消息列表，但一行文字都没解析出来（指纹=${fingerprint.take(60)}）")
                 showMessage(
-                    "这个聊天读不到文字（正文可能是自绘控件）。\n" +
-                        "已请求微信重绑一次，等一两秒看看；还不行就把 App 首页的「诊断」发我。",
+                    "暂未读取到文字，稍后重试或查看诊断。",
                     isError = true,
                 )
             } else {
                 showIdle(
-                    "这个聊天还没读到文字（正文可能是自绘控件）。\n" +
-                        "已经让微信重绑一次，等一两秒；还不行就把 App 首页的「诊断」发我。",
+                    "暂未读取到文字，请稍后重试。",
                 )
             }
             return
@@ -808,8 +916,7 @@ internal class Panel(private val a: Activity) {
             Trace.note("全图", "读到 ${msgs.size} 条全是图片/表情占位，一条文字都没有 → 多半选错列表了")
             dumpDiagnosis(decor, list, input, "读到 ${msgs.size} 条消息，但全部是图片/表情占位，一条文字都没有")
             showMessage(
-                "读到的全是图片占位、一条文字都没有 —— 多半是消息列表选错了。\n" +
-                    "诊断已写入 App 首页「诊断」卡片，长按标题也能重新生成。",
+                "图片尚未识别出文字，可稍后重试。",
                 isError = true,
             )
             return
@@ -817,7 +924,7 @@ internal class Panel(private val a: Activity) {
         // 最后一条是我发的：没什么可回的。卡片开着就只把说明换掉，**不替用户收**（见 [expanded] 的规矩）
         if (msgs.last().fromMe) {
             Trace.note("方向", "最后一条是我发的 → 没什么可回，只更新按钮与卡片说明")
-            showIdle("最后一条是你发的 —— 这条没什么可回，收到新消息时这里会自动更新。")
+            showIdle("等待对方的新消息。")
             return
         }
         val roleContext = roleContextFor(chatName, msgs)
@@ -936,21 +1043,23 @@ internal class Panel(private val a: Activity) {
 
     /** 看到新的探测请求就回执（带上「当时在哪一屏」+ 微信版本，App 那边直接显示）。 */
     private fun maybeAnswerProbe() {
+        if (host != ChatHost.WECHAT) return
         refreshPrefs()
         val req = prefs?.getLong(Keys.PROBE_REQ, 0L) ?: 0L
         if (req <= lastProbeReq) return
         lastProbeReq = req
         val ver = runCatching {
-            a.packageManager.getPackageInfo("com.tencent.mm", 0).versionName
+            a.packageManager.getPackageInfo(host.packageName, 0).versionName
         }.getOrNull().orEmpty()
         Heartbeat.send(
             a, 0,
             // 带上请求号（= 那次请求的时间戳）：App 就能分辨「这一轮探测被回答了」还是「答的是更早那一轮」
-            probe = "#$req · 页面=" + a.javaClass.simpleName + (if (ver.isBlank()) "" else " · 微信 $ver"),
+            probe = "#$req · 页面=" + a.javaClass.simpleName + (if (ver.isBlank()) "" else " · ${host.label} $ver"),
         )
     }
 
     private fun maybePullConversations(decor: View) {
+        if (host != ChatHost.WECHAT) return
         val c = config
         val req = prefs?.getLong(Keys.CHAT_REQ, 0L) ?: 0L
         val fresh = req > lastConvReq
@@ -990,7 +1099,7 @@ internal class Panel(private val a: Activity) {
         try {
             val (names, info) = reader.conversationNames(decor)
             val tagged = "页面=${a.javaClass.simpleName}｜$info"
-            val joined = names.joinToString("\n")
+            val joined = names.map { host.conversationKey(it) }.filter { it.isNotBlank() }.joinToString("\n")
             // 只在「App 明确要」或「名字真的变了」时留痕：白名单开着时会 15 秒自动扫一次，
             // 每次都记的话，轨迹会被这一行刷满、把真正的判定挤出去。
             if (fresh || (names.isNotEmpty() && joined != lastConvNames)) {
@@ -1118,7 +1227,7 @@ internal class Panel(private val a: Activity) {
                 append("候选回复要贴合这个说话风格：用词、语气、句子长短、标点与表情习惯都要像。\n")
             }
             if (hasRole && role != null) {
-                append("【对方档案】微信名「").append(role.name).append('」')
+                append("【对方档案】会话「").append(conversationDisplayName(role.name)).append('」')
                 if (role.relation.isNotBlank()) append("｜TA 是用户的：").append(role.relation)
                 append('\n')
                 if (role.note.isNotBlank()) append("【平时的关系】").append(role.note).append('\n')
@@ -1162,7 +1271,6 @@ internal class Panel(private val a: Activity) {
                 if (!extra.isNullOrBlank()) append(extra).append('\n')
                 append(reader.diagnose(decor, list, input))
             }
-            XposedApi.log("$diag")
             Heartbeat.send(a, 0, diag)
         } catch (t: Throwable) {
             XposedApi.log("生成诊断失败: $t")
@@ -1187,7 +1295,7 @@ internal class Panel(private val a: Activity) {
             append("—— 面板状态 ——\n")
             append("running=$running attached=$attached onChat=$onChat job=$job recheck=$recheck\n")
             append("card=${vis(card)} isShown=${card.isShown} 挂在当前decor=${card.parent === decor}\n")
-            append("chip=${vis(chip)} isShown=${chip.isShown} 文本=「${chipText}」 挂在当前decor=${chip.parent === decor}\n")
+            append("chip=${vis(chipSurface)} isShown=${chipSurface.isShown} 挂在当前decor=${chipSurface.parent === decor}\n")
             append("折叠：expanded=$expanded hasResult=$hasResult\n")
             append("inputRef=${inputRef?.let { "${it.javaClass.simpleName} ${it.width}x${it.height} isShown=${it.isShown}" } ?: "null"}\n")
             append("listRef=${listRef?.let { "${it.javaClass.simpleName} ${it.width}x${it.height} 子=${it.childCount}" } ?: "null"}\n")
@@ -1221,13 +1329,13 @@ internal class Panel(private val a: Activity) {
      * 于是「读取一切正常，但屏幕上什么都看不见」。挂错地方时重新挂一次即可。
      */
     private fun ensureAttached(decor: ViewGroup) {
-        if (attached && card.parent === decor && chip.parent === decor) return
+        if (attached && card.parent === decor && chipSurface.parent === decor) return
         val now = System.currentTimeMillis()
         if (now - lastAttachTry < 3_000L) return
         lastAttachTry = now
         XposedApi.log("decor 变了，重新挂卡片（card.parent=${card.parent}）")
         runCatching { (card.parent as? ViewGroup)?.removeView(card) }
-        runCatching { (chip.parent as? ViewGroup)?.removeView(chip) }
+        runCatching { (chipSurface.parent as? ViewGroup)?.removeView(chipSurface) }
         runCatching { card.removeAllViews() }
         attached = false
         attach()
@@ -1248,6 +1356,36 @@ internal class Panel(private val a: Activity) {
         } catch (t: Throwable) {
             XposedApi.log("prefs: $t")
         }
+    }
+
+    private fun requestSettingGroups(cfg: ConfigData): List<String> = listOf(
+            conversationDigest(cfg.prompt, cfg.model, cfg.baseUrl, cfg.apiKey, cfg.model2, cfg.baseUrl2, cfg.apiKey2),
+            conversationDigest(
+                (host == ChatHost.WECHAT && cfg.enabled).toString(), (host == ChatHost.QQ && cfg.qqEnabled).toString(), cfg.graded.toString(), cfg.temperature.toString(), cfg.maxTokens.toString(),
+                cfg.jsonMode.toString(), cfg.ctx.toString(), cfg.allowSensitive.toString(),
+            ),
+            conversationDigest(cfg.whitelistEnabled.toString(), cfg.whitelist.sorted().toString()),
+            conversationDigest(cfg.proxyEnabled.toString(), cfg.proxyPort.toString(), cfg.proxyToken),
+        )
+
+    private fun callbackContextCurrent(expected: String, expectedRevision: String): Boolean {
+        if (!running || !onChat || expected.isBlank() || a.isDestroyed || a.isFinishing) return false
+        val decor = a.window?.decorView ?: return false
+        if (!decor.hasWindowFocus()) return false
+        val current = prefs?.let { runCatching { ConfigData.from(it) }.getOrNull() } ?: return false
+        if (host == ChatHost.QQ && !current.qqEnabled) return false
+        val input = reader.findChatInput(decor)
+        val list = reader.findList(decor, input) ?: return false
+        val observed = host.conversationKey(reader.findChatTitle(decor, list).orEmpty())
+        if (observed != expected || chatBlocked(current.whitelistEnabled, current.whitelist, observed)) return false
+        val actualRevision = conversationDigest(observed, conversationDigest(*requestSettingGroups(current).toTypedArray()))
+        return actualRevision == expectedRevision
+    }
+
+    private fun discardStaleCallback() {
+        invalidateUncertainContext()
+        lastScreenFingerprint = ""
+        showStuck("军师 · 待识别", "会话或设置已变化，请重新识别。")
     }
 
     private fun reloadConfig(): Boolean {
@@ -1279,6 +1417,8 @@ internal class Panel(private val a: Activity) {
                 }),
         )
         val gen = ++generation
+        val requestConversation = chatName
+        val requestRevision = contextRevision
         showThinking()
         Thread {
             var suggestion: Suggestion? = null
@@ -1330,6 +1470,7 @@ internal class Panel(private val a: Activity) {
             val err = error
             handler.post {
                 if (gen != generation) return@post
+                if (!callbackContextCurrent(requestConversation, requestRevision)) { discardStaleCallback(); return@post }
                 job = Job.None
                 Trace.note(
                     "结果",
@@ -1357,6 +1498,7 @@ internal class Panel(private val a: Activity) {
     }
 
     private fun regenerate() {
+        manualSession.start()
         cache.remove(lastFingerprint)
         lastCallAt = 0
         // 「没变就不重读」那道早退要放过这一轮；再读不到消息列表也要照样报出来
@@ -1390,11 +1532,12 @@ internal class Panel(private val a: Activity) {
             return
         }
         if (job != Job.None) return
-        opts.visibility = View.GONE
         val gen = generation
+        val requestConversation = chatName
+        val requestRevision = contextRevision
         val requestKey = lastFingerprint
         val original = reply.text
-        body.text = "$head｜改写中…"
+        body.text = "正在改写…"
         job = Job.Rewrite(requestKey)
         Thread {
             var text: String? = null
@@ -1412,17 +1555,20 @@ internal class Panel(private val a: Activity) {
             handler.post {
                 runCatching {
                     if (gen != generation) return@runCatching
+                    if (!callbackContextCurrent(requestConversation, requestRevision)) { discardStaleCallback(); return@runCatching }
                     job = Job.None
                     if (done != null) {
-                        body.text = "$head｜$done"
+                        body.text = done
+                        body.tag = done
                         val cur = cache[requestKey] ?: shown
                         val list = cur.replies.toMutableList()
                         if (index in list.indices) list[index] = list[index].copy(text = done)
                         cache[requestKey] = cur.copy(replies = list)
                         if (used > 0) Heartbeat.send(a, used)
                     } else {
-                        body.text = "$head｜$original"
-                        showMessage("改写失败：${failure?.message ?: "未知错误"}", isError = true)
+                        body.text = original
+                        body.tag = original
+                        toast("改写失败，原回复已保留")
                     }
                 }.onFailure { XposedApi.log("rewrite: $it") }
             }
@@ -1430,122 +1576,73 @@ internal class Panel(private val a: Activity) {
     }
 
     private fun render(s: Suggestion, msgs: List<ChatMsg>, fromCache: Boolean) {
-        // **幂等**：同一份结果、同样几条消息，就不再重建正文。
-        // 重建 = removeAllViews + 重新加一遍，会肉眼可见地闪一下；如果指纹不稳定导致每轮都重建，
-        // 用户看到的就是「卡片折叠、展开、折叠、展开」那种往复抖动（用户实测报过）。
-        val sig = conversationDigest(
-            s.intent, s.risk, s.note, s.why, s.best.toString(), s.partial.toString(),
-            s.replies.joinToString("\u0000") { it.style + it.text }, msgs.size.toString(),
-        )
+        val sig = conversationDigest(s.intent, s.risk, s.note, s.why, s.best.toString(), s.partial.toString(),
+            s.replies.joinToString("\u0000") { it.style + it.text }, msgs.size.toString())
         if (body == Body.Result && renderedSig == sig) {
-            setChip("军师 · 风险${s.risk} · ${s.replies.size}条", chipColor(s.risk))
+            setChip("军师 · ${s.risk}风险 · ${s.replies.size}条", chipColor(s.risk))
             return
         }
         renderedSig = sig
         body = Body.Result
-        title.text = "军师 · ${s.intent} · 风险${s.risk}" + if (fromCache) " · 缓存" else ""
-        title.setTextColor(riskColor(s.risk))
+        manualSession.finish()
+        title.text = "回复建议 · ${s.risk}风险"
+        title.setTextColor(colorMain)
         bodyBox.removeAllViews()
-        bodyBox.addView(label(lastThree(msgs), 10f, colorSub) { setPadding(0, dp(2), 0, dp(2)) })
-        if (s.note.isNotBlank()) {
-            bodyBox.addView(label(s.note, 12f, colorSub) { setPadding(0, dp(4), 0, dp(2)) })
-        }
-        // 分级模式：哪一路挂了直接写在卡片上（另一路的内容照常显示）
-        s.warnings.forEach { w ->
-            bodyBox.addView(label(w, 11f, colorWarn) { setPadding(0, dp(4), 0, 0) })
-        }
-        s.replies.forEachIndexed { index, r ->
-            val starred = s.best == index
-            // 偏长的候选标一下：提示词要求 40~45 字，太长的不像人话（只提示，不拦）
-            val head = buildString {
-                append(if (starred) "★ ${r.style}" else r.style)
-                if (isReplyTooLong(r.text)) append(" · 偏长")
-            }
-            val row = LinearLayout(a).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val body = label("$head｜${r.text}", 14f, colorMain) {
-                background = roundRect(colorReply, 14)
+        if (s.note.isNotBlank()) bodyBox.addView(label(s.note, 12f, colorSub) { setPadding(0, dp(4), 0, dp(6)) })
+        s.warnings.forEach { warning -> bodyBox.addView(label(warning, 12f, colorWarn)) }
+        val renderGeneration = generation
+        val renderConversation = chatName
+        s.replies.forEachIndexed { index, reply ->
+            val block = LinearLayout(a).apply {
+                orientation = LinearLayout.VERTICAL
+                background = roundRect(colorReply, 18)
                 setPadding(dp(12), dp(8), dp(12), dp(8))
             }
-            body.setOnClickListener { fill(r.text) }
-            body.setOnLongClickListener {
-                copyToClipboard(r.text)
+            val line = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+            val style = label((if (s.best == index) "推荐 · " else "") + reply.style, 12f, colorAccent)
+            line.addView(style, LinearLayout.LayoutParams(0, dp(36), 1f))
+            val copy = actionLabel("复制", colorSub)
+            line.addView(copy)
+            block.addView(line)
+            val text = label(reply.text, 15f, colorMain) {
+                tag = reply.text
+                minHeight = dp(48)
+                setLineSpacing(dp(3).toFloat(), 1f)
+                setPadding(0, dp(4), 0, dp(8))
+            }
+            text.setOnClickListener {
+                fill(text.tag as? String ?: reply.text, renderConversation, renderGeneration)
+            }
+            text.setOnLongClickListener {
+                if (resultContextCurrent(renderConversation, renderGeneration, requireInput = false)) copyToClipboard(text.tag as? String ?: reply.text)
                 true
             }
-            row.addView(body, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-
-            // 「✎」= 对**这一条**做局部改写（再短点 / 更正式 / 换个说法），另外两条不动
-            val edit = label("✎", 13f, colorSub) {
-                background = roundRect(colorReply, 14)
-                setPadding(dp(10), dp(8), dp(10), dp(8))
-                gravity = Gravity.CENTER
+            copy.setOnClickListener {
+                if (resultContextCurrent(renderConversation, renderGeneration, requireInput = false)) copyToClipboard(text.tag as? String ?: reply.text)
             }
-            row.addView(
-                edit,
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                    .apply { leftMargin = dp(4) },
-            )
-            bodyBox.addView(
-                row,
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                    .apply { topMargin = dp(6) },
-            )
-            if (starred && s.why.isNotBlank()) {
-                bodyBox.addView(label("★ 最推荐：${s.why}", 10f, colorSub) { setPadding(dp(12), dp(2), 0, 0) })
-            }
-
-            // 三个预设默认不占地方，点「✎」才出现
-            val opts = LinearLayout(a).apply {
-                orientation = LinearLayout.HORIZONTAL
-                visibility = View.GONE
-            }
+            block.addView(text)
+            val actions = LinearLayout(a).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
             REWRITE_PRESETS.forEach { preset ->
-                val option = label(preset.first, 11f, colorSub) {
-                    background = roundRect(colorReply, 12)
-                    setPadding(dp(8), dp(4), dp(8), dp(4))
-                    gravity = Gravity.CENTER
-                }
+                val option = actionLabel(preset.first, colorAccent)
                 option.setOnClickListener {
-                    rewriteReply(index, r, body, head, preset.second, opts, s)
+                    if (resultContextCurrent(renderConversation, renderGeneration, requireInput = false)) {
+                        rewriteReply(index, reply.copy(text = text.tag as? String ?: reply.text), text, "", preset.second, actions,
+                            cache[lastFingerprint] ?: s)
+                    }
                 }
-                opts.addView(
-                    option,
-                    LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                        .apply { rightMargin = dp(4) },
-                )
+                actions.addView(option, LinearLayout.LayoutParams(0, dp(44), 1f))
             }
-            bodyBox.addView(
-                opts,
-                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-                    .apply { topMargin = dp(4) },
-            )
-            edit.setOnClickListener {
-                opts.visibility = if (opts.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-            }
+            block.addView(actions)
+            bodyBox.addView(block, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) })
         }
-        bodyBox.addView(
-            label(
-                buildString {
-                    append("点一下填入输入框 · 长按复制 · 本模块不会自动发送")
-                    append("\nAI 生成，发送前请自行判断")
-                    if (s.partial) append("\n⚠ 模型输出被截断，这份是抢救出来的，建议点「↻ 重新识别」重来")
-                    if (s.replies.isEmpty()) append("\n⚠ 这次没拿到可用回复，点「↻ 重新识别」重来")
-                },
-                10f,
-                colorSub,
-            ) { setPadding(0, dp(6), 0, 0) },
-        )
-        // 默认不打扰：只有你已经把卡片打开着，才把新结果摊在眼前；
-        // 折叠着的时候只更新按钮上的「风险 + 条数」，点一下才展开。
-        setChip("军师 · 风险${s.risk} · ${s.replies.size}条", chipColor(s.risk))
+        if (s.partial) bodyBox.addView(label("结果不完整，可重新识别。", 12f, colorWarn))
+        if (s.replies.isEmpty()) bodyBox.addView(label("暂未生成可用回复，请重试。", 14f, colorSub))
+        bodyBox.addView(label("点回复填入 · 长按复制 · 发送由你决定", 11f, colorSub) { setPadding(0, dp(10), 0, dp(2)) })
+        setChip("军师 · ${s.risk}风险 · ${s.replies.size}条", chipColor(s.risk))
     }
 
     private fun renderSensitive(hits: List<String>, joined: String) {
-        // 「有变化」= 第一次进敏感态、或命中词换了。**只有变化时才动正文与折叠状态**：
-        // 同一批词复现时只更新按钮 —— 以前这里无条件 setExpanded(true)，
-        // 用户点 ▾ 收起来、900ms 后又被弹开，根本按不住。
+        // 敏感状态只更新内容和气泡，绝不替用户展开卡片。
         val changed = body != Body.Sensitive || sensitiveHits != hits
         body = Body.Sensitive
         if (!changed) {
@@ -1557,7 +1654,7 @@ internal class Panel(private val a: Activity) {
         title.setTextColor(colorWarn)
         bodyBox.removeAllViews()
         bodyBox.addView(
-            label("命中：${hits.joinToString("、")}\n默认不发给模型。要发就点下面，或到「设置」里关掉这个检查。", 12f, colorSub),
+            label("含敏感内容：${hits.joinToString("、")}。本次尚未发送给模型。", 13f, colorSub),
         )
         val go = label("仍然分析这一条", 14f, colorMain) {
             background = roundRect(colorReply, 14)
@@ -1571,33 +1668,31 @@ internal class Panel(private val a: Activity) {
             skipSensitiveText = joined
             lastScreenFingerprint = ""
             recheck = true
+            manualSession.start()
             Trace.note("敏感", "用户点了「仍然分析这一条」→ 这一段放行（不再拦）")
             handler.post { runCatching { tick() } }
         }
         bodyBox.addView(go, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
-        // 这条要你亲自拍板「发不发」，所以直接摊开，不折叠
         setChip("⚠ 敏感内容 · 点开看", 0xE6C97A00.toInt())
-        setExpanded(true, "敏感命中（状态转移）")
     }
 
     private fun showMessage(message: String, isError: Boolean = false) {
+        manualSession.finish()
         val changed = body != Body.Message || lastMessage != message
         body = Body.Message
         lastMessage = message
-        // 同一句话复现时只更新按钮：**不再重复自动展开** —— 否则「每轮都弹一次」会和收起动作
-        // 打起架来，看起来就是折叠 / 展开往复循环（用户实测报过）。
+        // 异步提示只更新内容，不改变用户的展开 / 收起意图。
         if (changed) {
             title.text = if (isError) "生成失败" else "TalkTact"
             title.setTextColor(if (isError) colorBad else colorAccent)
             bodyBox.removeAllViews()
-            bodyBox.addView(label(message, 13f, if (isError) colorBad else colorMain))
+            bodyBox.addView(label(overlayStatusHint(message), 14f, if (isError) colorBad else colorMain))
         }
-        // 出错和提示这类「你必须看一眼」的事，直接摊开，不折叠
+        // 首次出错和后续变化都只更新气泡。
         setChip(
             if (isError) "⚠ 军师出错 · 点开看" else "军师 · 点开看",
             if (isError) 0xE6D64545.toInt() else 0xE67C3AED.toInt(),
         )
-        if (changed) setExpanded(true, if (isError) "出错，要你看一眼" else "提示，要你看一眼")
     }
 
     // ---------------- 折叠 / 展开 ----------------
@@ -1610,8 +1705,9 @@ internal class Panel(private val a: Activity) {
      * 改成「不点开就只是个按钮」，想看了点开，看完一点就收回去，不打扰看消息。
      */
     private fun applyVisibility() {
-        card.visibility = if (expanded) View.VISIBLE else View.GONE
-        chip.visibility = if (!expanded && onChat) View.VISIBLE else View.GONE
+        card.visibility = if (expanded && onChat) View.VISIBLE else View.GONE
+        chipSurface.visibility = if (!expanded && onChat) View.VISIBLE else View.GONE
+        allowBackdrop(backdropAllowed)
     }
 
     /**
@@ -1621,26 +1717,11 @@ internal class Panel(private val a: Activity) {
      * 「卡片自己关了」在轨迹里**完全看不见**（这也是它拖了两轮没查出来的原因）。
      */
     private fun setExpanded(visible: Boolean, why: String = "", byUser: Boolean = false) {
+        // 只有明确点击能展开；敏感检查、错误、异步结果或页面恢复均无权展开。
+        if (visible && !byUser) return
         if (expanded == visible) {
             applyVisibility()
             return
-        }
-        if (!byUser) {
-            // **抖动保护**：机器自己在一段时间内反复改折叠状态 → 停手。
-            // 用户实测报过「折叠、展开、折叠、展开往复循环」——那是 tick 里两个分支在互相打架；
-            // 不管根因是哪两个，这种抖动都不该由用户承受。顶到上限就保持现状，并把原因记进轨迹
-            // （轨迹会连着写出前几次是谁让它变的，根因照样查得到）。
-            val now = System.currentTimeMillis()
-            if (now - autoToggleAt > AUTO_TOGGLE_WINDOW_MS) {
-                autoToggles = 0
-                autoToggleAt = now
-            }
-            autoToggles++
-            if (autoToggles > AUTO_TOGGLE_MAX) {
-                Trace.note("卡片", "抖动保护：${AUTO_TOGGLE_WINDOW_MS / 1000} 秒内机器已改过 $AUTO_TOGGLE_MAX 次 → 不再自动改（这次的原因：$why）")
-                applyVisibility()
-                return
-            }
         }
         Trace.note("卡片", (if (visible) "展开" else "收起") + "（$why）" + if (byUser) " · 用户点的" else "")
         expanded = visible
@@ -1651,7 +1732,7 @@ internal class Panel(private val a: Activity) {
     private fun setChip(text: String, color: Int = 0xE67C3AED.toInt()) {
         chipText = text
         chip.text = text
-        chip.background = roundRect(color, 18)
+        chip.setTextColor(if (color == 0xE67C3AED.toInt()) colorAccent else (color or 0xFF000000.toInt()))
         applyVisibility()
     }
 
@@ -1714,11 +1795,12 @@ internal class Panel(private val a: Activity) {
      * 也就是「点开又自动关闭」的来源。要收，用户点 ▾；离开聊天页时 [hideAll] 会收。
      */
     private fun showIdle(reason: String = "", chip: String = "↻ 识别") {
+        manualSession.finish()
         body = Body.Idle
         setChip(chip)
         if (!expanded || reason.isBlank()) return
         // 卡片开着：就地换成一句说明，别把它抽走（抽走就是「自动关闭」）
-        title.text = "军师 · 待命"
+        title.text = "回复建议"
         title.setTextColor(colorAccent)
         bodyBox.removeAllViews()
         bodyBox.addView(label(reason, 13f, colorSub))
@@ -1726,12 +1808,13 @@ internal class Panel(private val a: Activity) {
 
     /** 正在调接口：按钮上就能看出来，默认不摊开卡片打扰人（但展开着的那份也同步成进度）。 */
     private fun showThinking() {
+        manualSession.finish()
         body = Body.Thinking
         setChip("军师 · 思考中…")
-        title.text = "军师 · 思考中…"
+        title.text = "正在生成…"
         title.setTextColor(colorAccent)
         bodyBox.removeAllViews()
-        bodyBox.addView(label("正在读这一屏、调接口…", 13f, colorMain))
+        bodyBox.addView(label("正在准备回复建议…", 14f, colorSub))
     }
 
     /**
@@ -1752,7 +1835,24 @@ internal class Panel(private val a: Activity) {
      * 那正是「换了窗口还在显示上一个窗口的内容」（issue #6）。
      * 与 [resetPanel] 的区别：那个是「离开聊天页」，这个是「还在聊天页、但不知道是谁」。
      */
+    private fun clearSensitiveApproval() {
+        skipSensitiveFor = ""
+        skipSensitiveSession = ""
+        skipSensitiveText = ""
+    }
+
+    private fun invalidateUncertainContext() {
+        if (body != Body.Stuck || job != Job.None) generation++
+        job = Job.None
+        clearSensitiveApproval()
+        manualSession.finish()
+        ocr.cancelPending()
+        allowBackdrop(false)
+    }
+
     private fun dropConversation() {
+        allowBackdrop(false)
+        ocr.cancelPending()
         generation++
         job = Job.None
         chatName = ""
@@ -1780,6 +1880,8 @@ internal class Panel(private val a: Activity) {
      * 现在只有这**一份**。
      */
     private fun resetPanel() {
+        clearSensitiveApproval()
+        manualSession.finish()
         // 非聊天页每 2.6 秒就会走一次 hideAll，别每次都白抬 generation（没在飞的任务就不用作废）
         if (onChat || job != Job.None) generation++
         job = Job.None
@@ -1791,7 +1893,8 @@ internal class Panel(private val a: Activity) {
         // 离开这一屏也要把指纹作废，回来才会重新渲染一次
         lastScreenFingerprint = ""
         card.visibility = View.GONE
-        chip.visibility = View.GONE
+        chipSurface.visibility = View.GONE
+        allowBackdrop(false)
     }
 
     /**
@@ -1803,12 +1906,12 @@ internal class Panel(private val a: Activity) {
      *
      * [cheap] = true 时不翻列表（省一次整树遍历，给「窗口没焦点」这种每轮都会走到的路径用）。
      */
-    private fun chatPageEvidence(cand: View?, decor: View, cheap: Boolean): String? = when {
-        cand != null -> "有像输入框的控件"
-        !cheap && reader.findList(decor, null) != null -> "有像消息列表的容器"
-        a.javaClass.simpleName.contains("Chatting", ignoreCase = true) ->
-            "Activity 名字像聊天页（${a.javaClass.simpleName}）"
-        else -> null
+    private fun chatPageEvidence(cand: View?, decor: View, cheap: Boolean): String? {
+        val candidate = cand?.let { it.isShown && it.width > 0 && it.height > 0 } == true
+        val composer = reader.hasChatComposer(decor)
+        val list = !cheap && reader.findList(decor, null) != null
+        val activity = a.javaClass.simpleName.contains("Chatting", true) || a.javaClass.simpleName.contains("AIO", true)
+        return if (overlayChatEvidence(candidate, composer, list, activity)) "聊天输入区可见" else null
     }
 
     /**
@@ -1821,6 +1924,7 @@ internal class Panel(private val a: Activity) {
      * 刻意不动 [expanded]（用户开着就开着），也不作废在飞的请求 —— 这一屏只是「读不出来」，不是「走了」。
      */
     private fun showStuck(chip: String, reason: String) {
+        manualSession.finish()
         onChat = true // 折叠按钮的可见性要求 onChat
         stuckReason = reason
         body = Body.Stuck
@@ -1834,15 +1938,10 @@ internal class Panel(private val a: Activity) {
 
     /** 把「这一屏为什么用不了」摊进卡片（点开按钮就能看到，也能把诊断拿到手）。 */
     private fun renderStuck() {
-        title.text = "军师 · 这一屏用不了"
+        title.text = "暂不可用"
         title.setTextColor(colorWarn)
         bodyBox.removeAllViews()
-        bodyBox.addView(label(stuckReason, 13f, colorSub))
-        bodyBox.addView(
-            label("长按标题可以生成一份诊断；App 首页「诊断」卡片里能复制出来发我。", 13f, colorSub) {
-                setPadding(0, dp(6), 0, 0)
-            },
-        )
+        bodyBox.addView(label(overlayStatusHint(stuckReason), 14f, colorSub) { setPadding(0, dp(8), 0, dp(12)) })
     }
 
     private fun lastThree(msgs: List<ChatMsg>): String =
@@ -1856,17 +1955,33 @@ internal class Panel(private val a: Activity) {
 
     // ---------------- 交互 ----------------
 
-    private fun fill(text: String) {
-        val decor = a.window?.decorView ?: return
-        val input = reader.findChatInput(decor) ?: return
+    private fun resultContextCurrent(expected: String, expectedGeneration: Int, requireInput: Boolean = true): Boolean {
+        if (!running || !onChat || generation != expectedGeneration || expected.isBlank()) return false
+        val decor = a.window?.decorView ?: return false
+        if (!decor.hasWindowFocus()) return false
+        val cfg = prefs?.let { runCatching { ConfigData.from(it) }.getOrNull() } ?: return false
+        if (host == ChatHost.QQ && !cfg.qqEnabled) return false
+        val input = reader.findChatInput(decor)
+        if (requireInput && input == null) { toast("请先切换到文字输入"); return false }
+        val list = reader.findList(decor, input) ?: return false
+        val actual = host.conversationKey(reader.findChatTitle(decor, list).orEmpty())
+        if (actual != expected || chatBlocked(cfg.whitelistEnabled, cfg.whitelist, actual)) {
+            toast("会话已变化，请重新识别")
+            return false
+        }
+        return true
+    }
+
+    private fun fill(text: String, expected: String, expectedGeneration: Int) {
+        if (!resultContextCurrent(expected, expectedGeneration)) return
+        val input = a.window?.decorView?.let { reader.findChatInput(it) } ?: return
         try {
             input.setText(text)
             input.setSelection(text.length)
             input.requestFocus()
-            title.text = "已填入 · 按发送即可"
-            toast("已填入输入框")
+            title.text = "已填入 · 发送由你决定"
         } catch (t: Throwable) {
-            XposedApi.log("fill: $t")
+            XposedApi.log("fill failed: ${t.javaClass.simpleName}")
         }
     }
 
@@ -1897,10 +2012,6 @@ private const val CONV_PULL_MIN_MS = 15_000L
  * 900ms 一轮 × 3 ≈ 2.7 秒 —— 够覆盖「微信切布局时短暂读空」，又不会把「一直读不到」拖成永远。
  */
 private const val BLANK_TITLE_MAX_TICKS = 3
-
-/** 折叠抖动保护：这个窗口内机器自己最多改 [AUTO_TOGGLE_MAX] 次折叠状态（用户点的不受限）。 */
-private const val AUTO_TOGGLE_WINDOW_MS = 10_000L
-private const val AUTO_TOGGLE_MAX = 3
 
 /**
  * 实时探测的轮询间隔。

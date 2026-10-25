@@ -7,9 +7,9 @@
 # 注意 102 的行为变更：targeting 102 的模块**不得**再调用 de.robv.android.xposed 下的任何 API。
 minApiVersion=102
 targetApiVersion=102
-# 作用域固定为 scope.list 里那几个包（本模块只可能对微信有意义）
+# 作用域固定为 scope.list 里那几个包（仅微信、QQ 与模块自身探针）
 staticScope=true
-# hook 抛异常时按「当作没有这个 hook、照常放行」处理，避免把微信搞崩
+# hook 抛异常时按「当作没有这个 hook、照常放行」处理，保护聊天宿主继续运行
 exceptionMode=protective
 # 热重载起步阶段先不开：需要配套实现 onHotReloading/onHotReloaded
 autoHotReload=false

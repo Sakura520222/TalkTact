@@ -63,6 +63,24 @@ fun chatTitleScore(
         (candidate.textSize.coerceAtMost(dp(40).toFloat()) / 4f).toInt()
 }
 
+/** QQ 标题靠左，资源名可能被混淆；仅接收消息列表上方的工具栏文字。 */
+internal fun qqChatTitleScore(
+    candidate: TitleCandidateSpec,
+    screenWidth: Int,
+    density: Float,
+    bandTop: Int,
+    bandBottom: Int,
+    namedResource: Boolean,
+    avoidTexts: Set<String> = emptySet(),
+): Int? {
+    val score = chatTitleScore(candidate.copy(x = (screenWidth - candidate.width) / 2),
+        screenWidth, density, bandTop, bandBottom, avoidTexts) ?: return null
+    if (candidate.text in setOf("QQ", "消息", "联系人", "动态", "设置", "聊天")) return null
+    if (candidate.x < 32 * density || candidate.x + candidate.width > screenWidth - 12 * density) return null
+    if (candidate.height > 60 * density || candidate.textSize in 0.01f..(13f * density)) return null
+    return score + (if (namedResource) 2000 else 0) + candidate.textSize.toInt() * 8 - (candidate.y - bandTop)
+}
+
 fun isConversationListContainer(shown: Boolean, childCount: Int, listLike: Boolean, height: Int, top: Int, screenHeight: Int): Boolean =
     shown && childCount >= 3 && listLike && height > 0 && top + height > 0 &&
         top < screenHeight && height >= screenHeight * 0.25f

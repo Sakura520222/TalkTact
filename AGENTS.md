@@ -12,7 +12,7 @@
 
 ## 项目基线与代码位置
 
-这是 Android 微信聊天助手和 libxposed Modern API 模块，App 界面使用 Kotlin / Jetpack Compose，微信内悬浮面板使用 Android View。
+这是 Android 微信聊天助手和 libxposed Modern API 模块，App 界面使用 Kotlin / Jetpack Compose，微信 / QQ 内悬浮面板使用 Android View。
 
 | 项目 | 当前配置 / 入口 |
 | --- | --- |
@@ -22,14 +22,14 @@
 | 应用标识 | `io.github.shibry88_netizen.talktact` |
 | Kotlin namespace | `dev.goutou.wingman`，与应用标识不同 |
 | 平台与 ABI | `minSdk=31`、`targetSdk=34`、`compileSdk=37`；当前只打包 `arm64-v8a` |
-| 工具链 | JDK 17、Gradle Wrapper 9.3.1、AGP 9.1.1、内置 Kotlin / Compose 插件 2.2.10；调整时同步核对 CI |
+| 工具链 | Gradle / Robolectric JDK 21、Gradle Wrapper 9.3.1、AGP 9.1.1、Kotlin / Compose 插件 2.4.20（字节码 target 17）；调整时同步核对 CI |
 | 框架 | libxposed API 102；API 使用 `compileOnly`，service 使用 `implementation` |
 
 以下源码路径均相对于 `app/src/main/java/dev/goutou/wingman/`：
 
 | 位置 | 职责 |
 | --- | --- |
-| `WingmanEntry.kt`、`XposedApi.kt` | 现代 Xposed 入口、框架调用、自身探针与微信主进程 hook |
+| `WingmanEntry.kt`、`XposedApi.kt` | 现代 Xposed 入口、框架调用、自身探针与微信 / QQ 主进程 hook |
 | `MainActivity.kt`、`TalkTactApp.kt`、`HeartbeatReceiver.kt` | App 入口、初始化与注入侧状态回传 |
 | `config/Config.kt`、`config/RemoteSync.kt` | 配置 key、本地读写、App 向框架 remote preferences 的同步 |
 | `config/Roles.kt`、`config/Backup.kt`、`config/DiagExport.kt` | 角色归档、配置迁移和诊断导出 |
@@ -37,14 +37,16 @@
 | `wechat/Overlay.kt`、`wechat/ConversationState.kt`、`wechat/Trace.kt` | 微信悬浮面板、生命周期、会话身份、缓存去重和决策轨迹 |
 | `llm/` | 接口形态、请求、提示词、JSON 解析、候选回复及模型分级 |
 | `proxy/`、`ocr/`、`wechat/ImageOcr.kt` | App 内回环代理、离线识图及微信侧图片读取 |
-| `ui/`、`style/SelfStyle.kt` | Compose 页面、玻璃效果与本人说话风格采集 / 提炼 |
+| `ui/HyperComponents.kt`、`ui/*Page.kt`、`ui/Screens.kt` | 五页界面、分组设置、档案详情与诊断 |
+| `ui/LiquidGlass.kt`、`ui/Ui.kt`、`style/SelfStyle.kt` | 底栏玻璃、主题 / 路由与本人风格采集 / 提炼 |
 
 单元测试位于 `app/src/test/java/dev/goutou/wingman/`；构建流程见 `.github/workflows/build.yml`，发布流程见 `.github/workflows/publish.yml`。
 
 ## 必须保持的行为
 
-- 候选回复仅在用户点击后填入输入框；长按复制。不得自动点击发送、自动回复或群发，也不得读取微信数据库或扩大到其他应用。
-- 微信功能只在 `com.tencent.mm` 主进程运行；保留模块自身进程中的激活探针。hook 失败应保护宿主继续运行，不能阻断原方法或令微信崩溃。
+- 候选回复仅在用户点击后填入输入框；长按复制。不得自动点击发送、自动回复或群发，也不得读取宿主数据库或扩大到微信 / QQ 之外的应用。
+- 宿主仅限 `com.tencent.mm` 与 `com.tencent.mobileqq` 精确主进程，保留模块自身激活探针。QQ 默认关闭，开启后只在主动识别时读取消息 / OCR / 调用模型；微信关闭自动分析后仍可手动使用。hook 失败须保护原方法和宿主进程。
+- 卡片只由用户点击展开；敏感、错误、异步结果和页面恢复均不能自动展开。会话切换与离开页面可收起。QQ 档案 / 白名单使用内部宿主标记，界面只展示可读名称，不能与同名微信会话混用。
 - 白名单启用后，未选中的会话和无法确定名称的会话均应拒绝处理；限制必须覆盖消息读取、角色归档、风格采集、OCR 和模型调用，不能只在 UI 层隐藏。
 - 保留敏感内容检测、用户主动放行的范围与敏感消息归档过滤；切换会话、页面或配置后，不得沿用另一个上下文的放行状态。
 - 会话切换或页面离开时，旧请求回调不能覆盖新会话的界面、缓存或输入框。网络和 OCR 工作不得阻塞微信主线程；面板暂停 / 销毁时要清理相关任务与回调。
@@ -73,7 +75,7 @@
 
 ## 构建与验证
 
-仓库包含固定为 Gradle 9.3.1 的 Wrapper，并校验下载包的 SHA-256；优先用 `gradlew.bat`（Windows）或 `./gradlew`（Linux / macOS），不要求全局安装 Gradle。Gradle JDK 使用 17。Android SDK 路径通过本机环境或未跟踪的 `local.properties` 配置；SDK 安装项以 CI 为准，当前 CI 安装 `platforms;android-37.0` 与 `build-tools;36.0.0`。AGP 9.1.1 才能识别 SDK 37.0 的新格式，不要降级回 8.12.0 或降低 compileSdk。Android Studio 配置见 `docs/FORK.md`。
+仓库包含固定为 Gradle 9.3.1 的 Wrapper，并校验下载包的 SHA-256；优先用 `gradlew.bat`（Windows）或 `./gradlew`（Linux / macOS），不要求全局安装 Gradle。Gradle / Robolectric JDK 使用 21，Java / Kotlin 字节码目标保留 17。Android SDK 路径通过本机环境或未跟踪的 `local.properties` 配置；SDK 安装项以 CI 为准，当前 CI 安装 `platforms;android-37.0` 与 `build-tools;36.0.0`。AGP 9.1.1 才能识别 SDK 37.0 的新格式，不要降级回 8.12.0 或降低 compileSdk。Android Studio 配置见 `docs/FORK.md`。
 
 从仓库根目录执行，以下命令适用于 PowerShell：
 

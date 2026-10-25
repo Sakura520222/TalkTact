@@ -43,7 +43,7 @@ def verify(apk: Path, expected_cert: Path | None) -> None:
             line.strip() for line in archive.read("META-INF/xposed/scope.list").decode().splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         }
-        if scope != {"com.tencent.mm", "io.github.shibry88_netizen.talktact"}:
+        if scope != {"com.tencent.mm", "com.tencent.mobileqq", "io.github.shibry88_netizen.talktact"}:
             raise ValueError("Module scope changed")
         properties = dict(
             line.strip().split("=", 1)

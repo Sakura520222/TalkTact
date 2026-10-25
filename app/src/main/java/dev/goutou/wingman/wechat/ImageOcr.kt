@@ -37,8 +37,35 @@ import java.util.concurrent.Executors
  */
 internal class ImageOcr {
 
-    private val pool = Executors.newSingleThreadExecutor { r ->
+    private fun executor() = Executors.newSingleThreadExecutor { r ->
         Thread(r, "talktact-ocr").also { it.isDaemon = true }
+    }
+    private var pool = executor()
+    private var epoch = 0
+    private var closed = false
+    @Volatile private var activeConnection: HttpURLConnection? = null
+
+    fun cancelPending() = synchronized(this) {
+        if (!closed && inFlight.isEmpty() && keysOfTick.isEmpty()) return@synchronized
+        epoch++
+        pool.shutdownNow()
+        if (!closed) pool = executor()
+        inFlight.clear()
+        keysOfTick.clear()
+        probeOfKey.clear()
+        dirty = false
+        val connection = activeConnection
+        activeConnection = null
+        if (connection != null) Thread({ runCatching { connection.disconnect() } }, "talktact-ocr-cancel").apply { isDaemon = true; start() }
+    }
+
+    fun close() = synchronized(this) {
+        closed = true
+        cancelPending()
+        done.clear()
+        failed.clear()
+        line = null
+        reported = null
     }
 
     /** 图 sha256 -> 认出来的文字（空串 = 确实没字，也算认过，别再发）。按访问顺序 LRU。 */
@@ -95,7 +122,7 @@ internal class ImageOcr {
      */
     fun prepare(rows: List<RowSnapshot>, cfg: ConfigData): Boolean = synchronized(this) {
         keysOfTick.clear()
-        if (!cfg.ocrEnabled) return false
+        if (closed || !cfg.ocrEnabled) return false
         if (!ProxyProtocol.ocrUsable(true, ProxyProtocol.routeOf(cfg.proxyEnabled, cfg.proxyToken))) {
             line = "跳过：没走本地代理（认字要在 App 进程里做，先把代理打开）"
             return false
@@ -166,12 +193,15 @@ internal class ImageOcr {
     }
 
     private fun submit(key: String, bytes: ByteArray, cfg: ConfigData, probe: String?) {
+        val requestEpoch = epoch
         pool.execute {
+            if (synchronized(this) { closed || requestEpoch != epoch }) return@execute
             try {
                 val started = System.currentTimeMillis()
-                val text = post(bytes, cfg)
+                val text = post(bytes, cfg, requestEpoch)
                 val cost = System.currentTimeMillis() - started
                 synchronized(this) {
+                    if (closed || requestEpoch != epoch) return@synchronized
                     done[key] = text
                     inFlight.remove(key)
                     failed.remove(key)
@@ -187,6 +217,7 @@ internal class ImageOcr {
                 // 失败不进 done：也可能只是代理刚起来 / App 刚被杀，冷却过后值得重试。
                 // 这里绝不 rethrow —— 识图失败只是「这次没有文字可用」。
                 synchronized(this) {
+                    if (closed || requestEpoch != epoch) return@synchronized
                     inFlight.remove(key)
                     failed[key] = System.currentTimeMillis()
                     line = "失败：${t.message}"
@@ -197,8 +228,12 @@ internal class ImageOcr {
     }
 
     /** 真正那一跳：带 token 把 JPEG 丢给 App 的回环端口，响应体就是文字。 */
-    private fun post(bytes: ByteArray, cfg: ConfigData): String {
+    private fun post(bytes: ByteArray, cfg: ConfigData, requestEpoch: Int): String {
         val conn = URL(ProxyProtocol.ocrUrl(cfg.proxyPort)).openConnection() as HttpURLConnection
+        synchronized(this) {
+            if (closed || requestEpoch != epoch) throw InterruptedException("OCR cancelled")
+            activeConnection = conn
+        }
         return try {
             conn.requestMethod = "POST"
             conn.connectTimeout = 3_000
@@ -216,6 +251,7 @@ internal class ImageOcr {
             if (code !in 200..299) throw IllegalStateException("HTTP $code ${body.take(120)}")
             body
         } finally {
+            synchronized(this) { if (activeConnection === conn) activeConnection = null }
             runCatching { conn.disconnect() }
         }
     }

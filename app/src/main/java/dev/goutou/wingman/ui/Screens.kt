@@ -1,6 +1,12 @@
 package dev.goutou.wingman.ui
 
 import android.content.Intent
+import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.Speed
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -112,6 +118,9 @@ import dev.goutou.wingman.llm.ModelList
 import dev.goutou.wingman.llm.gradedWaitMs
 import dev.goutou.wingman.llm.isReplyTooLong
 import dev.goutou.wingman.wechat.ChatMsg
+import dev.goutou.wingman.wechat.ChatHost
+import dev.goutou.wingman.wechat.conversationDisplayName
+import dev.goutou.wingman.wechat.conversationRawName
 import dev.goutou.wingman.wechat.Sensitive
 import dev.goutou.wingman.wechat.filterNames
 import kotlinx.coroutines.Dispatchers
@@ -158,43 +167,6 @@ private fun levelText(palette: Palette, level: Level): Color = when (level) {
  * 和「运行状态」页那个 [DetailToggle] 是同一套观感，区别是这里直接包成一张卡片 ——
  * 页面上那些「配一次就不常看」的大块内容用它，页面能短一大截。
  */
-@Composable
-private fun FoldCard(
-    title: String,
-    summary: String,
-    expanded: Boolean,
-    glassAlpha: Float,
-    onToggle: () -> Unit,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    val palette = LocalPalette.current
-    val angle by animateFloatAsState(if (expanded) 180f else 0f, tween(180))
-    GlassCard(glassAlpha) {
-        Row(
-            Modifier.fillMaxWidth().clickable(onClick = onToggle),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-                Text(summary, fontSize = 13.sp, color = palette.sub)
-            }
-            Icon(
-                Icons.Filled.ExpandMore,
-                contentDescription = if (expanded) "收起" else "展开",
-                tint = palette.sub,
-                modifier = Modifier.rotate(angle),
-            )
-        }
-        AnimatedVisibility(
-            visible = expanded,
-            enter = expandVertically() + fadeIn(),
-            exit = shrinkVertically() + fadeOut(),
-        ) {
-            Column { content() }
-        }
-    }
-}
-
 /**
  * 长说明的折叠显示 —— 只做呈现，不参与任何逻辑。
  *
@@ -203,40 +175,9 @@ private fun FoldCard(
  * 所以调大调小 [collapsedLines] 只影响观感，不影响功能。
  */
 @Composable
-private fun HintText(
-    text: String,
-    color: Color,
-    modifier: Modifier = Modifier,
-    fontSize: TextUnit = 11.sp,
-    collapsedLines: Int = 2,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    var overflowed by remember { mutableStateOf(false) }
-    Column(modifier) {
-        Text(
-            text = text,
-            fontSize = fontSize,
-            color = color,
-            maxLines = if (expanded) Int.MAX_VALUE else collapsedLines,
-            overflow = TextOverflow.Ellipsis,
-            onTextLayout = { result -> if (!expanded) overflowed = result.hasVisualOverflow },
-        )
-        if (overflowed) {
-            Text(
-                text = if (expanded) "收起" else "展开",
-                fontSize = fontSize,
-                fontWeight = FontWeight.Medium,
-                color = LocalPalette.current.primary,
-                modifier = Modifier
-                    .padding(top = 3.dp)
-                    .clickable(onClickLabel = if (expanded) "收起这段说明" else "展开这段说明") {
-                        expanded = !expanded
-                    },
-            )
-        }
-    }
+private fun HintText(text: String, color: Color, modifier: Modifier = Modifier, fontSize: TextUnit = 13.sp) {
+    Text(text, modifier = modifier, fontSize = fontSize, color = color)
 }
-
 
 /** 一行「标题 + 值」的网络信息。值取不到就显示 null —— 不编。 */
 @Composable
@@ -268,72 +209,7 @@ private fun HeaderButton(text: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun CheckRow(check: Check, glassAlpha: Float) {
-    val palette = LocalPalette.current
-    val color = levelColor(palette, check.level)
-    // 状态行是顶层元素（直接躺在 LazyColumn 上），所以用玻璃面板：背后是真实的背景模糊
-    GlassSurface(
-        shape = RoundedCornerShape(RadiusR2),
-        glassAlpha = glassAlpha,
-        // 直接铺在渐变上的行也是 L1 —— 统一走 L1 的填充数值（以前自己写一套 0.26/0.18，
-        // 结果比卡片还亮，一眼就分成两种材质）
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
-        onClick = check.onClick,
-    ) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            // 批 4c：状态点统一 8dp（原来 10dp / 8dp 各写各的）
-            StatusDot(color)
-            Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                Text(check.title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-                Text(check.desc, fontSize = 13.sp, color = palette.sub)
-            }
-            Text(check.level.label, fontSize = 13.sp, color = levelText(palette, check.level), fontWeight = FontWeight.Medium)
-        }
-    }
-}
-
-/**
- * 「详细状态」的折叠开关。
- *
- * 顶上那张「全部就绪」卡片保持原样不动，7 项明细收在这一行下面 ——
- * 不点开就只占一行，点一下才铺出来。
- */
-@Composable
-private fun DetailToggle(
-    expanded: Boolean,
-    summary: String,
-    glassAlpha: Float,
-    onClick: () -> Unit,
-) {
-    val palette = LocalPalette.current
-    val angle by animateFloatAsState(if (expanded) 180f else 0f, tween(180))
-    GlassSurface(
-        shape = RoundedCornerShape(RadiusR2),
-        glassAlpha = glassAlpha,
-        // 直接铺在渐变上的行也是 L1 —— 统一走 L1 的填充数值（以前自己写一套 0.26/0.18，
-        // 结果比卡片还亮，一眼就分成两种材质）
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp),
-        onClick = onClick,
-    ) {
-        Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("详细状态", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-                Text(summary, fontSize = 13.sp, color = palette.sub)
-            }
-            Icon(
-                Icons.Filled.ExpandMore,
-                contentDescription = if (expanded) "收起" else "展开",
-                tint = palette.sub,
-                modifier = Modifier.rotate(angle),
-            )
-        }
-    }
-}
-
-// ================= 运行状态 =================
-
-@Composable
-fun StatusScreen(store: ConfigStore, onTrial: () -> Unit) {
+fun StatusScreen(store: ConfigStore, onTrial: () -> Unit, onConnection: () -> Unit = {}, onDiag: () -> Unit = {}) {
     val palette = LocalPalette.current
     val context = LocalContext.current
     var tick by remember { mutableStateOf(0) }
@@ -347,9 +223,7 @@ fun StatusScreen(store: ConfigStore, onTrial: () -> Unit) {
     var probeDetail by remember { mutableStateOf<String?>(null) }
     var probeOk by remember { mutableStateOf(false) }
     var probing by remember { mutableStateOf(false) }
-    var filter by remember { mutableStateOf(0) }
     /** 「详细状态」展开了没有。默认收起：这一页只需要一眼看健康。 */
-    var detail by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val glass = cfg.glassAlpha
     val active = moduleActive(store)
@@ -471,114 +345,107 @@ fun StatusScreen(store: ConfigStore, onTrial: () -> Unit) {
             Level.OK -> 2
         }
     }
-    val shown = when (filter) {
-        1 -> ordered.filter { it.level == Level.BAD }
-        2 -> ordered.filter { it.level == Level.WARN }
-        3 -> ordered.filter { it.level == Level.OK }
-        else -> ordered
+    fun runProbe() {
+    probing = true
+    probeVerdict = null
+    probeDetail = null
+    val conf = store.load()
+    scope.launch {
+        var verdict: String
+        var detail: String? = null
+        try {
+            val r = withContext(Dispatchers.IO) { LlmClient(conf).probe() }
+            if (r.totalTokens > 0) store.addUsage(r.totalTokens)
+            probeOk = true
+            verdict = "通 · 往返 ${r.totalMs}ms · 模型 ${r.model} · ${r.totalTokens} token"
+            val sb = StringBuilder()
+            sb.append("写回复一路：连接 ")
+                .append(r.connectMs?.let { "${it}ms" } ?: "未测得")
+                .append(" · DNS ${r.dnsMs}ms · 往返 ${r.totalMs}ms")
+            r.targetIp?.let { sb.append(" · 目标 ").append(it) }
+
+            // 分级模式：第二套接口也得单独测 —— 它可能是完全不同的服务商。
+            // 两路的延迟要分别列出来；慢的那一路决定整张卡片什么时候能出来。
+            var riskMs = 0L
+            if (conf.graded) {
+                try {
+                    val r2 = withContext(Dispatchers.IO) {
+                        LlmClient(conf.riskEndpoint(), second = true).probe()
+                    }
+                    if (r2.totalTokens > 0) store.addUsage(r2.totalTokens)
+                    riskMs = r2.totalMs
+                    sb.append("\n风险一路：连接 ")
+                        .append(r2.connectMs?.let { "${it}ms" } ?: "未测得")
+                        .append(" · DNS ${r2.dnsMs}ms · 往返 ${r2.totalMs}ms")
+                    r2.targetIp?.let { sb.append(" · 目标 ").append(it) }
+                    val diff = kotlin.math.abs(r.totalMs - r2.totalMs)
+                    if (diff > 300) {
+                        sb.append("\n两路差 ${diff}ms —— 快的那路要等慢的那路（自检只量最小请求，实际生成更久）")
+                    }
+                } catch (t: Throwable) {
+                    sb.append("\n风险一路：失败 —— ").append(t.message)
+                }
+            }
+            detail = sb.toString()
+            // 记下来：设置页的公告栏要显示，运行时「两路对齐等待」也用它
+            store.saveProbeMs(r.totalMs, riskMs)
+        } catch (t: Throwable) {
+            probeOk = false
+            verdict = "失败：${t.message}"
+            detail = (t as? LlmException)?.hint
+        }
+        // 让归属地跟着这次自检重新查一遍
+        NetInfo.clearGeoCache()
+        tick++
+        probeVerdict = verdict
+        probeDetail = detail
+        probing = false
     }
-
-    LazyColumn(contentPadding = PaddingValues(bottom = 120.dp)) {
-        item {
-            ScreenHeader("运行状态", "WeChat · 聊天助手 ${appVersion(context)}") {
-                HeaderButton("↻ 刷新") { tick++ }
-                Button(
-                    onClick = onTrial,
-                    shape = RoundedCornerShape(RadiusR2),
-                    colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                ) { Text("试聊") }
+    }
+    HyperPage("TalkTact", actions = {
+        TextButton(onClick = { cfg = store.load(); store.requestProbe(); tick++ }) { Text("刷新") }
+    }) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(
+                Modifier.weight(1f).height(176.dp).clip(RoundedCornerShape(24.dp))
+                    .background(levelColor(palette, if (active) Level.OK else Level.BAD).copy(alpha = if (palette.dark) 0.22f else 0.14f))
+                    .padding(18.dp),
+            ) {
+                Text(if (active) "模块已激活" else "模块未激活", fontSize = 21.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+                Text(if (answered) "微信已响应" else "等待微信回执", fontSize = 13.sp, color = palette.sub)
+                Spacer(Modifier.weight(1f))
+                Text(if (active) "✓" else "!", fontSize = 48.sp, fontWeight = FontWeight.Medium, color = levelText(palette, if (active) Level.OK else Level.BAD), modifier = Modifier.align(Alignment.End))
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                DashboardMetric("调用次数", "${usage.first}", Modifier.height(82.dp))
+                DashboardMetric("累计 token", "${usage.second}", Modifier.height(82.dp))
             }
         }
-        item {
-            val tone = levelColor(palette, overall)
-            GlassCard(glass, border = tone.copy(alpha = CardBorderAlpha)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    // 批 4c：不再铺一块 46dp 实心色 —— 淡底 + 1dp 描边 + 状态色符号。
-                    // 全屏「大面积」只留这一处，而且是空心的圈，红起来也不刺眼。
-                    Box(
-                        Modifier.size(46.dp).clip(CircleShape)
-                            .background(tone.copy(alpha = ChipBgAlpha))
-                            .border(1.dp, tone.copy(alpha = CardBorderAlpha), CircleShape),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            when (overall) { Level.OK -> "✓"; Level.WARN -> "!"; Level.BAD -> "✕" },
-                            fontSize = 24.sp,
-                            color = tone,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
-                    Column(Modifier.weight(1f).padding(start = 14.dp)) {
-                        Text(
-                            when (overall) { Level.OK -> "全部就绪"; Level.WARN -> "基本可用"; Level.BAD -> "需要处理" },
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = palette.text,
-                        )
-                        Text(
-                            "${checks.size} 项已检测 · 通过 $ok · 待确认 $warn · 有问题 $bad",
-                            fontSize = 13.sp,
-                            color = palette.sub,
-                        )
-                        // hero 的职责收窄成两件事：一眼看健康 + 直接点出**最该处理的那一条**。
-                        // 完整明细整包交给下面的「详细状态」（那边是异常优先排序）。
-                        val firstIssue = ordered.firstOrNull { it.level != Level.OK }
-                        if (firstIssue != null) {
-                            Text(
-                                "最该处理：${firstIssue.title} —— ${firstIssue.desc.take(70)}",
-                                fontSize = 13.sp,
-                                color = levelText(palette, firstIssue.level),
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    StatCell("${usage.first}", "调用次数", Modifier.weight(1f))
-                    StatCell("${usage.second}", "累计 token", Modifier.weight(1f))
-                    StatCell(formatTime(beat).takeIf { beat > 0 } ?: "—", "最近心跳", Modifier.weight(1f))
-                }
-            }
+        HyperGroup("快捷操作") {
+            HyperRow("开始试聊", "预览候选回复", Icons.Outlined.ChatBubbleOutline, onClick = onTrial)
+            HyperRow("接口与模型", cfg.model.ifBlank { "尚未配置" }, Icons.Outlined.Tune, onClick = onConnection)
+            HyperRow("诊断与日志", "界面快照、请求和决策轨迹", Icons.Outlined.BugReport, onClick = onDiag)
         }
-        item {
-            Column {
-                // 原来那 7 项明细是直接铺在页面上的，把这一页撑得很长；现在收在折叠菜单里
-                DetailToggle(
-                    expanded = detail,
-                    // 摘要里把「异常优先」写明：展开后第一眼就是该动的那几条，不用自己往下翻
-                    summary = "详细状态（异常优先）· ${checks.size} 项：有问题 $bad · 待确认 $warn · 通过 $ok",
-                    glassAlpha = glass,
-                ) { detail = !detail }
-                AnimatedVisibility(
-                    visible = detail,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut(),
-                ) {
-                    Column {
-                        GlassCard(glass) {
-                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                GlassPill("全部 ${checks.size}", filter == 0, Modifier.weight(1f)) { filter = 0 }
-                                GlassPill("有问题 $bad", filter == 1, Modifier.weight(1f)) { filter = 1 }
-                                GlassPill("待确认 $warn", filter == 2, Modifier.weight(1f)) { filter = 2 }
-                                GlassPill("通过 $ok", filter == 3, Modifier.weight(1f)) { filter = 3 }
-                            }
-                        }
-                        shown.forEach { CheckRow(it, glass) }
-                    }
-                }
-            }
+        HyperGroup("接口自检") {
+            HyperRow("连接测试", if (cfg.graded) "分别测试回复和风险接口" else "发送最小请求，测量连通性与延迟", Icons.Outlined.Speed, trailing = {
+                TextButton(onClick = { runProbe() }, enabled = !probing) { Text(if (probing) "测试中…" else "开始自检") }
+            })
+            if (probeVerdict != null) Text(probeVerdict.orEmpty(), Modifier.padding(horizontal = 20.dp, vertical = 8.dp), fontSize = 13.sp, color = if (probeOk) palette.ok else palette.bad)
+            if (probeDetail != null) Text(probeDetail.orEmpty(), Modifier.padding(horizontal = 20.dp, vertical = 8.dp), fontSize = 13.sp, color = palette.sub)
         }
-        item {
-            GlassCard(glass) {
-                Text("接口自检", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-                Text(
-                    "只看「连不连得上、要多久」：发一次最小请求（一句 ping、只让它回 1 个 token）。\n" +
-                        "不拼当前 skill、也不看模型回了什么 —— 模型没按 JSON 回复算不上连接问题，" +
-                        "那种情况去「试一试」页验证。",
-                    fontSize = 13.sp,
-                    color = palette.sub,
+        HyperGroup("运行检查 · $ok 通过 / $warn 待确认 / $bad 异常") {
+            ordered.forEach { check ->
+                HyperRow(
+                    check.title,
+                    check.desc.substringBefore(" —— ").take(130),
+                    onClick = check.onClick ?: if (check.title == "API Key" || check.title == "接口与模型") onConnection else null,
+                    trailing = { Text(check.level.label, fontSize = 12.sp, color = levelText(palette, check.level)) },
                 )
-
+            }
+            HyperRow("最近心跳", if (beat > 0) formatTime(beat) else "尚未收到")
+        }
+        HyperGroup("网络信息") {
+            Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
                 val baseUrl = cfg.baseUrl
                 val host = remember(baseUrl) { NetInfo.hostOf(baseUrl) }
                 // 内网 IP / 目标 IP：本地或 DNS 就能拿到，不依赖任何第三方
@@ -610,762 +477,24 @@ fun StatusScreen(store: ConfigStore, onTrial: () -> Unit) {
                 NetRow("目标服务器", joinInfo(targetIp, targetGeo?.province ?: targetGeo?.country), host)
                 Spacer(Modifier.height(4.dp))
                 HintText(
-                    if (!cfg.geoEnabled) "归属地查询已在「高级设置 → 诊断 → 网络信息」里关掉（IP 仍然只在本机解析）。"
-                    else "省份来自第三方 IP 库，仅供参考；取不到就显示 null。可在「高级设置 → 诊断 → 网络信息」里关掉或换接口。",
+                    if (!cfg.geoEnabled) "归属地查询已关闭。"
+                    else "归属地来自第三方，可在诊断页关闭。",
                     fontSize = 10.sp,
                     color = palette.sub,
                 )
 
                 Spacer(Modifier.height(10.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Button(
-                        onClick = {
-                            probing = true
-                            probeVerdict = null
-                            probeDetail = null
-                            val conf = store.load()
-                            scope.launch {
-                                var verdict: String
-                                var detail: String? = null
-                                try {
-                                    val r = withContext(Dispatchers.IO) { LlmClient(conf).probe() }
-                                    if (r.totalTokens > 0) store.addUsage(r.totalTokens)
-                                    probeOk = true
-                                    verdict = "通 · 往返 ${r.totalMs}ms · 模型 ${r.model} · ${r.totalTokens} token"
-                                    val sb = StringBuilder()
-                                    sb.append("写回复一路：连接 ")
-                                        .append(r.connectMs?.let { "${it}ms" } ?: "未测得")
-                                        .append(" · DNS ${r.dnsMs}ms · 往返 ${r.totalMs}ms")
-                                    r.targetIp?.let { sb.append(" · 目标 ").append(it) }
-
-                                    // 分级模式：第二套接口也得单独测 —— 它可能是完全不同的服务商。
-                                    // 两路的延迟要分别列出来；慢的那一路决定整张卡片什么时候能出来。
-                                    var riskMs = 0L
-                                    if (conf.graded) {
-                                        try {
-                                            val r2 = withContext(Dispatchers.IO) {
-                                                LlmClient(conf.riskEndpoint(), second = true).probe()
-                                            }
-                                            if (r2.totalTokens > 0) store.addUsage(r2.totalTokens)
-                                            riskMs = r2.totalMs
-                                            sb.append("\n风险一路：连接 ")
-                                                .append(r2.connectMs?.let { "${it}ms" } ?: "未测得")
-                                                .append(" · DNS ${r2.dnsMs}ms · 往返 ${r2.totalMs}ms")
-                                            r2.targetIp?.let { sb.append(" · 目标 ").append(it) }
-                                            val diff = kotlin.math.abs(r.totalMs - r2.totalMs)
-                                            if (diff > 300) {
-                                                sb.append("\n两路差 ${diff}ms —— 快的那路要等慢的那路（自检只量最小请求，实际生成更久）")
-                                            }
-                                        } catch (t: Throwable) {
-                                            sb.append("\n风险一路：失败 —— ").append(t.message)
-                                        }
-                                    }
-                                    detail = sb.toString()
-                                    // 记下来：设置页的公告栏要显示，运行时「两路对齐等待」也用它
-                                    store.saveProbeMs(r.totalMs, riskMs)
-                                } catch (t: Throwable) {
-                                    probeOk = false
-                                    verdict = "失败：${t.message}"
-                                    detail = (t as? LlmException)?.hint
-                                }
-                                // 让归属地跟着这次自检重新查一遍
-                                NetInfo.clearGeoCache()
-                                tick++
-                                probeVerdict = verdict
-                                probeDetail = detail
-                                probing = false
-                            }
-                        },
-                        enabled = !probing,
-                        shape = RoundedCornerShape(RadiusR2),
-                        colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                    ) { Text(if (probing) "测试中…" else "开始自检") }
-                    Spacer(Modifier.width(10.dp))
-                    Text(
-                        probeVerdict ?: "",
-                        fontSize = 13.sp,
-                        color = if (probeOk) palette.ok else palette.bad,
-                    )
-                }
-                probeDetail?.let {
-                    Spacer(Modifier.height(4.dp))
-                    Text(it, fontSize = 13.sp, color = palette.sub)
-                }
             }
         }
     }
 }
 
-// ================= 试一试 =================
-
 @Composable
-fun TrialScreen(store: ConfigStore, glassAlpha: Float) {
+private fun DashboardMetric(label: String, value: String, modifier: Modifier = Modifier) {
     val palette = LocalPalette.current
-    var input by remember { mutableStateOf("对方: 在吗\n我: 在\n对方: 周末有空吗，想约你吃个饭") }
-    var suggestion by remember { mutableStateOf<Suggestion?>(null) }
-    var rewriting by remember { mutableStateOf<Int?>(null) }
-    /** 哪一条的「✎」被点开了 —— 预设只在点开时出现（和微信里那张卡片同一套做法）。 */
-    var presetsOpen by remember { mutableStateOf<Int?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-    var info by remember { mutableStateOf<String?>(null) }
-    var loading by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    val clipboard = LocalClipboardManager.current
-    val hits = remember(input) { Sensitive.hits(input) }
-
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
-        ScreenHeader("试一试", "粘贴聊天 · 预览回复 · 验证接口")
-        GlassCard(glassAlpha) {
-            OutlinedTextField(
-                colors = glassFieldColors(),
-                shape = RoundedCornerShape(RadiusR2),
-                value = input,
-                onValueChange = { input = it },
-                modifier = Modifier.fillMaxWidth().heightIn(min = 130.dp),
-                label = { Text("每行一句，以「我:」或「对方:」开头") },
-            )
-            if (hits.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                Text("⚠ 含敏感内容：${hits.joinToString("、")}（微信里会先问你一次）", fontSize = 13.sp, color = palette.warn)
-            }
-            Spacer(Modifier.height(10.dp))
-            Button(
-                onClick = {
-                    loading = true
-                    error = null
-                    info = null
-                    suggestion = null
-                    val conf = store.load()
-                    scope.launch {
-                        try {
-                            val msgs = input.lines().filter { it.isNotBlank() }.map {
-                                val me = it.startsWith("我:") || it.startsWith("我：")
-                                ChatMsg(me, it.substringAfter(':').substringAfter('：').trim().ifEmpty { it })
-                            }
-                            if (conf.graded) {
-                                val out = withContext(Dispatchers.IO) {
-                                    Graded.run(
-                                        replyClient = LlmClient(conf),
-                                        riskClient = LlmClient(conf.riskEndpoint(), second = true),
-                                        skillPrompt = conf.prompt,
-                                        msgs = msgs,
-                                        roleContext = null,
-                                        waitMs = gradedWaitMs(conf.probeReplyMs, conf.probeRiskMs),
-                                    )
-                                }
-                                suggestion = out.suggestion
-                                if (out.totalTokens > 0) store.addUsage(out.totalTokens)
-                                info = "${out.millis}ms · ${out.totalTokens} token · 分级模式（两路并行）"
-                                if (out.suggestion == null) {
-                                    error = "两路都没跑通：风险一路 ${out.riskError ?: "-"}；写回复一路 ${out.replyError ?: "-"}"
-                                }
-                            } else {
-                                val result = withContext(Dispatchers.IO) { LlmClient(conf).analyze(msgs) }
-                                suggestion = result.suggestion
-                                if (result.totalTokens > 0) store.addUsage(result.totalTokens)
-                                info = "${result.millis}ms · ${result.totalTokens} token · ${result.model}"
-                            }
-                        } catch (t: Throwable) {
-                            error = t.message
-                        }
-                        loading = false
-                    }
-                },
-                modifier = Modifier.fillMaxWidth().height(50.dp),
-                enabled = !loading,
-                shape = RoundedCornerShape(RadiusR2),
-                colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-            ) { Text(if (loading) "思考中…" else "生成候选回复") }
-        }
-        error?.let { msg ->             GlassCard(glassAlpha, border = palette.badMark.copy(alpha = CardBorderAlpha)) { Text(msg, color = palette.bad, fontSize = 13.sp) } }
-        info?.let { GlassCard(glassAlpha) { Text(it, fontSize = 13.sp, color = palette.sub) } }
-        suggestion?.let { s ->
-            GlassCard(glassAlpha) {
-                Text("意图：${s.intent}", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = palette.text)
-                Text("风险：${s.risk}　${s.note}", fontSize = 13.sp, color = palette.sub)
-                Text("AI 生成 · 发送前请自行判断", fontSize = 13.sp, color = palette.sub)
-            }
-            if (s.partial) {
-                Text(
-                    "⚠ 模型输出被截断，这条是从残缺 JSON 里抢救出来的，建议重新生成",
-                    fontSize = 13.sp,
-                    color = palette.warn,
-                )
-            }
-            // 分级模式：哪一路挂了/没拿到回复，直接写出来，别让人对着空卡片猜
-            s.warnings.forEach { w -> Text(w, fontSize = 13.sp, color = palette.warn) }
-            if (s.replies.isEmpty()) {
-                Text("⚠ 这次没拿到可用回复，点上面「生成候选回复」重来", fontSize = 13.sp, color = palette.warn)
-            }
-            // 与微信里那张卡片**同一套规格**（设计师 P1）：三条候选装在**同一张卡**里，
-            // 每条是一个圆角填充块（头行「★ 风格 · 偏长」+ 右侧 ✎），预设**点 ✎ 才出现**。
-            // 以前这里是「每条候选一张 GlassCard + 三个预设永远铺在外面」，和微信卡片是两套做法 ——
-            // 同一个东西两副长相，用户得学两遍。
-            GlassCard(glassAlpha) {
-                s.replies.forEachIndexed { index, reply ->
-                    val starred = s.best == index
-                    Column(
-                        Modifier.fillMaxWidth()
-                            .clip(RoundedCornerShape(RadiusR2))
-                            .background(palette.soft)
-                            .clickable { clipboard.setText(AnnotatedString(reply.text)) }
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                buildString {
-                                    append(if (starred) "★ " else "")
-                                    append(reply.style)
-                                    if (isReplyTooLong(reply.text)) append(" · 偏长")
-                                },
-                                color = palette.primary,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
-                                modifier = Modifier.weight(1f),
-                            )
-                            // ✎ = 展开这一条的预设（再短点 / 更正式 / 换个说法），另外两条不动
-                            Text(
-                                "✎",
-                                fontSize = 13.sp,
-                                color = palette.sub,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(RadiusR1))
-                                    .background(palette.primary.copy(alpha = ChipBgAlpha))
-                                    .clickable { presetsOpen = if (presetsOpen == index) null else index }
-                                    .padding(horizontal = 10.dp, vertical = 3.dp),
-                            )
-                        }
-                        Text(reply.text, fontSize = 15.sp, color = palette.text)
-                        if (starred && s.why.isNotBlank()) {
-                            Text("★ 最推荐：${s.why}", fontSize = 13.sp, color = palette.sub)
-                        }
-                        if (isReplyTooLong(reply.text)) {
-                            Text(
-                                "${reply.text.length} 字，偏长 —— 发出去不太像人话，点右上角 ✎ 选「再短点」",
-                                fontSize = 13.sp,
-                                color = palette.warn,
-                            )
-                        }
-                        if (presetsOpen == index) {
-                            Spacer(Modifier.height(6.dp))
-                            // 只改这一条：走 complete()（一句话进一句话出），另外两条不动
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                REWRITE_PRESETS.forEach { preset ->
-                                    Text(
-                                        text = if (rewriting == index) "改写中…" else preset.first,
-                                        fontSize = 13.sp,
-                                        color = palette.primary,
-                                        modifier = Modifier
-                                            .clip(RoundedCornerShape(RadiusR1))
-                                            .background(palette.primary.copy(alpha = ChipBgAlpha))
-                                            .clickable(enabled = rewriting == null) {
-                                                val old = suggestion?.replies?.getOrNull(index)?.text ?: return@clickable
-                                                rewriting = index
-                                                val conf = store.load()
-                                                scope.launch {
-                                                    try {
-                                                        val (newText, tokens) = withContext(Dispatchers.IO) {
-                                                            LlmClient(conf).rewrite(old, preset.second)
-                                                        }
-                                                        if (tokens > 0) store.addUsage(tokens)
-                                                        suggestion = suggestion?.let { cur ->
-                                                            val list = cur.replies.toMutableList()
-                                                            if (index in list.indices) {
-                                                                list[index] = list[index].copy(text = newText)
-                                                            }
-                                                            cur.copy(replies = list)
-                                                        }
-                                                    } catch (t: Throwable) {
-                                                        error = "改写失败：${t.message}"
-                                                    }
-                                                    rewriting = null
-                                                }
-                                            }
-                                            .padding(horizontal = 8.dp, vertical = 3.dp),
-                                    )
-                                }
-                            }
-                        }
-                        Text("点一下复制", fontSize = 13.sp, color = palette.sub)
-                    }
-                    Spacer(Modifier.height(8.dp))
-                }
-            }
-        }
-    }
-}
-
-// ================= 军师（提示词 / skill，两级） =================
-
-@Composable
-fun MentorScreen(store: ConfigStore, glassAlpha: Float, onSaved: () -> Unit) {
-    val palette = LocalPalette.current
-    var cfg by remember { mutableStateOf(store.load()) }
-    // 「新手 / 进阶」以前是用 cfg.maxTokens == 0 推断出来的，会粘住：
-    // 只要进过一次进阶（token 档位被改成无限制），以后每次进来都自动是进阶，切回新手也甩不掉。
-    // 现在改成独立的界面偏好记下来。
-    var advanced by remember { mutableStateOf(cfg.mentorAdvanced) }
-    var tweak by remember { mutableStateOf(false) }
-    // skill 那两块默认收起：进来先看到「现在用的是哪个」，想换再点开
-    var skillsOpen by remember { mutableStateOf(false) }
-    var importOpen by remember { mutableStateOf(false) }
-    var text by remember { mutableStateOf(cfg.prompt) }
-    var url by remember { mutableStateOf("") }
-    var importing by remember { mutableStateOf(false) }
-    var note by remember { mutableStateOf<String?>(null) }
-    var dialog by remember { mutableStateOf<String?>(null) }
-    var confirmReset by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    // 「有没有还没保存的改动」= 草稿提示词和**上次落盘的那份**比（跟「外观」「高级设置」同一套判据）。
-    // 不能只看一个「保存过没有」的标志 —— 刚进页面它就说你没保存，红字等于天天亮着。
-    val dirty = text != cfg.prompt
-
-    fun persist(prompt: String, skillId: String, unlimited: Boolean) {
-        store.save(store.load().copy(prompt = prompt, skillId = skillId, maxTokens = if (unlimited) 0 else store.load().maxTokens))
-        cfg = store.load()
-        text = cfg.prompt
-        onSaved()
-    }
-
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
-        ScreenHeader("军师", "提示词 · skill")
-        GlassCard(glassAlpha) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                GlassPill("新手设置", !advanced, Modifier.weight(1f)) {
-                    advanced = false
-                    tweak = false
-                    store.save(store.load().copy(mentorAdvanced = false))
-                    cfg = store.load()
-                }
-                GlassPill("进阶设置", advanced, Modifier.weight(1f)) {
-                    advanced = true
-                    tweak = false
-                    val wasLimited = cfg.maxTokens != 0
-                    store.save(store.load().copy(maxTokens = 0, mentorAdvanced = true))
-                    cfg = store.load()
-                    onSaved()
-                    dialog = if (wasLimited) {
-                        "已切到进阶设置。\n\n为避免 skill 输出被截断，Token 限制已改为：无限制。"
-                    } else {
-                        "已切到进阶设置。"
-                    }
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            Text(
-                if (!advanced) "用内置的原版狗头军师，提示词可以直接编辑微调。"
-                else "从内置 skill 里选一个，或者粘一个 GitHub 上开源 skill 的地址导入。",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-        }
-
-        if (!advanced) {
-            GlassCard(glassAlpha) {
-                Text(
-                    if (text.contains("replies")) "✓ 含 JSON 输出契约 · ${text.length} 字" else "⚠ 缺少 JSON 契约，卡片会解析不了",
-                    fontSize = 13.sp,
-                    color = if (text.contains("replies")) palette.ok else palette.warn,
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    colors = glassFieldColors(),
-                    shape = RoundedCornerShape(RadiusR2),
-                    value = text,
-                    onValueChange = { text = it },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 280.dp),
-                )
-                Spacer(Modifier.height(10.dp))
-                if (dirty) {
-                    Text("未保存，你所做出的改动不会被保存", fontSize = 13.sp, color = palette.bad)
-                    Spacer(Modifier.height(6.dp))
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(
-                        onClick = { text = ConfigData().prompt },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(RadiusR2),
-                    ) { Text("恢复默认") }
-                    Button(
-                        onClick = { persist(text, "classic", unlimited = false) },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(RadiusR2),
-                        colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                    ) { Text(if (dirty) "保存" else "已保存") }
-                }
-            }
-        } else {
-            GroupTitle("当前军师")
-            // 「当前军师」是当前生效的状态，不能藏起来 —— 所以它是一张常驻卡，放在最前面；
-            // 换 skill 的入口收进下面的「Skill 库」分组，全页最多一层折叠。
-            GlassCard(glassAlpha) {
-                val src = BUILT_IN_SKILLS.firstOrNull { it.id == cfg.skillId }
-                val canReset = src != null && text != src.prompt
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(skillName(cfg.skillId), fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-                            Spacer(Modifier.width(8.dp))
-                            SourceChip(cfg.skillId)
-                        }
-                        Text(
-                            "${text.length} 字 · " +
-                                if (text.contains("replies")) "含 JSON 契约" else "⚠ 缺少 JSON 契约",
-                            fontSize = 13.sp,
-                            color = if (text.contains("replies")) palette.sub else palette.warn,
-                        )
-                    }
-                    if (canReset) {
-                        TextButton(onClick = { confirmReset = true }) { Text("重置") }
-                    }
-                    TextButton(onClick = { tweak = !tweak }) { Text(if (tweak) "收起" else "微调") }
-                }
-                Spacer(Modifier.height(6.dp))
-                // 这里只给「这是什么」；真要逐字看/改，点右上那个「微调」—— 那块才是编辑区。
-                HintText(
-                    src?.summary ?: text.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty(),
-                    fontSize = 13.sp,
-                    color = palette.sub,
-                )
-                if (tweak) {
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        colors = glassFieldColors(),
-                        shape = RoundedCornerShape(RadiusR2),
-                        value = text,
-                        onValueChange = { text = it },
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 220.dp),
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    if (dirty) {
-                        Text("未保存，你所做出的改动不会被保存", fontSize = 13.sp, color = palette.bad)
-                        Spacer(Modifier.height(6.dp))
-                    }
-                    Button(
-                        onClick = {
-                            // 内容跟哪个内置 skill 逐字一样，就还算那个 skill；动过了才算「自定义」
-                            val known = BUILT_IN_SKILLS.firstOrNull { it.prompt == text }?.id
-                            persist(text, known ?: "custom", unlimited = true)
-                        },
-                        modifier = Modifier.fillMaxWidth().height(48.dp),
-                        shape = RoundedCornerShape(RadiusR2),
-                        colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                    ) { Text(if (dirty) "保存" else "已保存") }
-                }
-            }
-
-            GroupTitle("Skill 库")
-            FoldCard(
-                title = "内置 skill",
-                summary = "当前是「${skillName(cfg.skillId)}」· 点开可换",
-                expanded = skillsOpen,
-                glassAlpha = glassAlpha,
-                onToggle = { skillsOpen = !skillsOpen },
-            ) {
-                Text("点一下直接启用（会替换当前提示词）", fontSize = 13.sp, color = palette.sub)
-                Spacer(Modifier.height(4.dp))
-                BUILT_IN_SKILLS.forEach { skill ->
-                    val selected = cfg.skillId == skill.id && cfg.prompt == skill.prompt
-                    Column(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(top = 10.dp)
-                            .clip(RoundedCornerShape(RadiusR2))
-                            .background(palette.glassTint.copy(alpha = if (selected) 0.18f else 0.09f))
-                            .clickable {
-                                store.save(store.load().copy(prompt = skill.prompt, skillId = skill.id, maxTokens = 0))
-                                cfg = store.load()
-                                text = cfg.prompt
-                                tweak = false
-                                onSaved()
-                                dialog = "已启用「${skill.name}」。\n\nToken 限制已改为：无限制。"
-                            }
-                            .padding(14.dp),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(skill.name, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text, modifier = Modifier.weight(1f))
-                            Text(
-                                if (selected) "使用中" else "启用",
-                                fontSize = 13.sp,
-                                color = if (selected) palette.ok else palette.primary,
-                            )
-                        }
-                        Text(skill.summary, fontSize = 13.sp, color = palette.sub)
-                    }
-                }
-            }
-
-            FoldCard(
-                title = "从 GitHub 导入 skill",
-                summary = "粘 SKILL.md 的地址，导入并启用",
-                expanded = importOpen,
-                glassAlpha = glassAlpha,
-                onToggle = { importOpen = !importOpen },
-            ) {
-                HintText(
-                    "粘 SKILL.md 的地址即可（网页地址也行，会自动换成 raw 直链）。导入时会自动补齐 JSON 输出契约。",
-                    fontSize = 13.sp,
-                    color = palette.sub,
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    colors = glassFieldColors(),
-                    shape = RoundedCornerShape(RadiusR2),
-                    value = url,
-                    onValueChange = { url = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("https://github.com/…/SKILL.md") },
-                    singleLine = true,
-                )
-                Spacer(Modifier.height(8.dp))
-                Button(
-                    onClick = {
-                        importing = true
-                        note = null
-                        val target = url
-                        scope.launch {
-                            note = try {
-                                val fetched = withContext(Dispatchers.IO) { RemoteSkill.fetch(target) }
-                                text = fetched
-                                persist(fetched, "custom", unlimited = true)
-                                dialog = "已导入并启用这个 skill。\n\nToken 限制已改为：无限制。"
-                                "导入成功 · ${fetched.length} 字"
-                            } catch (t: Throwable) {
-                                "导入失败：${t.message}"
-                            }
-                            importing = false
-                        }
-                    },
-                    enabled = !importing && url.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
-                    shape = RoundedCornerShape(RadiusR2),
-                    colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                ) { Text(if (importing) "导入中…" else "导入并启用") }
-                note?.let {
-                    Spacer(Modifier.height(6.dp))
-                    Text(it, fontSize = 13.sp, color = if (it.startsWith("导入成功")) palette.ok else palette.bad)
-                }
-            }
-        }
-    }
-
-    dialog?.let { msg ->
-        AlertDialog(
-            onDismissRequest = { dialog = null },
-            confirmButton = { TextButton(onClick = { dialog = null }) { Text("好") } },
-            title = { Text("进阶设置") },
-            text = { Text(msg) },
-        )
-    }
-
-    // 重置是**不可逆**的（改过的那份不留备份），所以先问一句再动。
-    if (confirmReset) {
-        val target = BUILT_IN_SKILLS.firstOrNull { it.id == cfg.skillId }
-        AlertDialog(
-            onDismissRequest = { confirmReset = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmReset = false
-                    target?.let { persist(it.prompt, it.id, unlimited = true) }
-                    tweak = false
-                }) { Text("重置") }
-            },
-            dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("取消") } },
-            title = { Text("重置提示词") },
-            text = { Text("把提示词恢复成「${skillName(cfg.skillId)}」的原版内容。你改过的那一份不会留备份。") },
-        )
-    }
-}
-
-// ================= 设置 =================
-
-/**
- * 设置首页。
- *
- * 只留日常会动的东西：外观（玻璃 / 背景）和关于。「接口地址 / 微信内自动分析 / 备份迁移 /
- * 诊断」这些配一次就不常动的，全收进「高级设置」二级页 —— 原来它们铺在这里，把外观挤到了下面。
- */
-@Composable
-fun SettingsScreen(
-    store: ConfigStore,
-    ui: ConfigData,
-    onUi: (ConfigData) -> Unit,
-    onOpenAdvanced: () -> Unit,
-) {
-    val palette = LocalPalette.current
-    val context = LocalContext.current
-    var d by remember { mutableStateOf(ui) }
-    // 见「高级设置」里同名的那段：拿草稿和上次落盘的那份比，才知道有没有没保存的改动
-    var persisted by remember { mutableStateOf(ui) }
-    val dirty = d != persisted
-
-    fun update(next: ConfigData) {
-        d = next
-        onUi(next)
-    }
-
-    fun saveAppearance() {
-        store.save(d)
-        d = store.load()
-        persisted = d
-        onUi(d)
-    }
-
-    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            } catch (t: Throwable) {
-                // 有的来源不支持持久化授权，那就只在本次运行里有效
-            }
-            update(d.copy(bgUri = uri.toString()))
-        }
-    }
-
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
-        ScreenHeader("设置", "外观 · 高级设置 · 关于")
-
-        GlassCard(d.glassAlpha) {
-            Text("外观", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            Spacer(Modifier.height(6.dp))
-            Text("玻璃不透明度：${(d.glassAlpha * 100).toInt()}%", fontSize = 13.sp, color = palette.sub)
-            Slider(value = d.glassAlpha, onValueChange = { update(d.copy(glassAlpha = it)) }, valueRange = 0.3f..1f)
-            Spacer(Modifier.height(4.dp))
-            HintText(
-                "玻璃背景模糊：${d.glassBlur.toInt()}dp（面板背后做一次真实模糊；内置渐变背景没有细节可模糊，会自动跳过）",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Slider(value = d.glassBlur, onValueChange = { update(d.copy(glassBlur = it)) }, valueRange = 0f..40f)
-            Spacer(Modifier.height(4.dp))
-            // 设备分级：把「自动」实际判成了哪一档直接写出来，省得猜为什么效果不一样
-            val lowRamDevice = remember { isLowRamDevice(context) }
-            val effectiveQuality = decideGlassQuality(d.glassQuality, lowRamDevice, Build.VERSION.SDK_INT)
-            Text(
-                "玻璃效果：${glassQualityLabel(effectiveQuality)}" +
-                    if (d.glassQuality == GLASS_QUALITY_AUTO) "　（自动判定）" else "　（手动选的）",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                GlassPill("自动", d.glassQuality == GLASS_QUALITY_AUTO, Modifier.weight(1f)) {
-                    update(d.copy(glassQuality = GLASS_QUALITY_AUTO))
-                }
-                GlassPill("高（全开）", d.glassQuality == GLASS_QUALITY_HIGH, Modifier.weight(1f)) {
-                    update(d.copy(glassQuality = GLASS_QUALITY_HIGH))
-                }
-                GlassPill("低（省电）", d.glassQuality == GLASS_QUALITY_LOW, Modifier.weight(1f)) {
-                    update(d.copy(glassQuality = GLASS_QUALITY_LOW))
-                }
-            }
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
-                    onClick = { pickImage.launch(arrayOf("image/*")) },
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(RadiusR2),
-                ) { Text("选择背景图") }
-                OutlinedButton(
-                    onClick = { update(d.copy(bgUri = "")) },
-                    enabled = d.bgUri.isNotBlank(),
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(RadiusR2),
-                ) { Text("恢复默认背景") }
-            }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                if (d.bgUri.isNotBlank()) {
-                    "已设置自定义背景：玻璃面板背后会对它做真实的背景模糊 + 折射。"
-                } else {
-                    "当前用的是内置渐变背景（跟随系统明暗自动切换，不是图片）；" +
-                        "选一张自己的图就会替换掉它，点「恢复默认背景」可以换回来。"
-                },
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            // 压暗只对自定义背景图开放：内置渐变本身已经调过明度，
-            // 再压一层会把配色一起糊掉，所以没选图时这个滑杆根本不出现。
-            if (d.bgUri.isNotBlank()) {
-                Spacer(Modifier.height(4.dp))
-                Text("背景压暗：${(d.bgDim * 100).toInt()}%", fontSize = 13.sp, color = palette.sub)
-                Slider(value = d.bgDim, onValueChange = { update(d.copy(bgDim = it)) }, valueRange = 0f..0.8f)
-            }
-            Spacer(Modifier.height(14.dp))
-            // 外观现在自己带一个保存按钮：接口那套已经搬进「高级设置」，别再共用一个「保存」了。
-            // 滑杆是即时预览的，但**不点这个按钮就不会落盘** —— 红字挨着它。
-            if (dirty) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "未保存，你所做出的改动不会被保存",
-                        modifier = Modifier.weight(1f),
-                        fontSize = 13.sp,
-                        color = palette.bad,
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Button(
-                        onClick = { saveAppearance() },
-                        modifier = Modifier.height(46.dp),
-                        shape = RoundedCornerShape(RadiusR2),
-                        colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                    ) { Text("保存外观") }
-                }
-            } else {
-                Button(
-                    onClick = { saveAppearance() },
-                    modifier = Modifier.fillMaxWidth().height(50.dp),
-                    shape = RoundedCornerShape(RadiusR2),
-                    colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                ) { Text("已保存") }
-            }
-        }
-
-        GlassCard(d.glassAlpha) {
-            Text("高级设置", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            // 三行「现在是什么样」：入口卡原来只有一句名词罗列（接口地址 / 分析 / 备份 / 诊断），
-            // 看完仍然不知道当前配成了什么。摘要只**报状态**、不做判断，要改再进去。
-            // 三行分别对应高级设置里的「接入 / 微信内 / 识别」三组，找东西时可以对上号。
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "接入：${d.baseUrl.ifBlank { "未填" }}　模型 ${d.model.ifBlank { "未填" }}　" +
-                    "${if (d.graded) "模型分级" else "直通"}",
-                fontSize = 13.sp,
-                color = palette.text,
-            )
-            Text(
-                "微信内：自动分析 ${if (d.enabled) "开" else "关"}　参考 ${d.ctx} 条　间隔 ${d.minIntervalSec}s　" +
-                    "白名单 ${if (d.whitelistEnabled) "${d.whitelist.size} 个" else "关"}",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Text(
-                "识别：图片文字 ${if (d.ocrEnabled) "开" else "关"}　本地代理 ${if (d.proxyEnabled) "开" else "关"}　" +
-                    "归属地查询 ${if (d.geoEnabled) "开" else "关"}",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = onOpenAdvanced,
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = RoundedCornerShape(RadiusR2),
-                colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-            ) { Text("高级设置") }
-        }
-
-        GlassCard(d.glassAlpha) {
-            Text("关于", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = palette.text)
-            Spacer(Modifier.height(6.dp))
-            Text("版本：${appVersion(context)}", fontSize = 13.sp, color = palette.text)
-            Spacer(Modifier.height(6.dp))
-            HintText(
-                "· 开启后，聊天页最近几条消息会发送到你填写的接口地址，请自行确认该服务可信。\n" +
-                    "· API Key 以明文存放在本应用私有目录（不能加密：注入微信进程的代码需要跨进程读取，Keystore 密钥按 UID 隔离读不到）。\n" +
-                    "· 只读消息、只把候选回复填进输入框，不会自动发送；但仍属于修改微信客户端行为，有风控风险，建议先用小号。\n" +
-                    "· 日志关键字：[Goutou]。",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-        }
+    Column(modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(palette.cardBg).padding(horizontal = 16.dp, vertical = 12.dp)) {
+        Text(label, fontSize = 13.sp, color = palette.sub)
+        Text(value, fontSize = 23.sp, fontWeight = FontWeight.Medium, color = palette.text)
     }
 }
 
@@ -1416,11 +545,13 @@ fun AdvancedScreen(
     onOpenDiag: () -> Unit,
     onOpenCandidates: () -> Unit,
     onBack: () -> Unit,
+    section: SettingsSection = SettingsSection.ALL,
+    onDraftState: (Boolean, () -> Unit) -> Unit = { _, _ -> },
 ) {
     val palette = LocalPalette.current
     val context = LocalContext.current
     var d by remember { mutableStateOf(ui) }
-    var includeKey by remember { mutableStateOf(true) }
+    var includeKey by remember { mutableStateOf(false) }
     var backupNote by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     // 「拉取模型列表」：拉回来存本机（列表 + 时间），进页面读缓存；手动输入永远保留
@@ -1611,6 +742,7 @@ fun AdvancedScreen(
         if (at > 0L) "$head · ${clockText(at)}" else head
     }
     var newChat by remember { mutableStateOf("") }
+    var newChatHost by remember { mutableStateOf(ChatHost.WECHAT) }
     // 白名单的「长按多选」状态。
     // （候选名单那一份跟着名单一起搬到二级页了，见 ChatCandidatesScreen —— 那边自己持有一份。）
     var whitePicking by remember { mutableStateOf(false) }
@@ -1638,444 +770,135 @@ fun AdvancedScreen(
         }
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
-        ScreenHeader("高级设置", "接口 · 分析 · 备份 · 诊断") {
-            HeaderButton("← 返回", onBack)
-        }
+    var pendingExit by remember { mutableStateOf<(() -> Unit)?>(null) }
+    fun leave(action: () -> Unit) { if (dirty) pendingExit = action else action() }
+    LaunchedEffect(dirty) { onDraftState(dirty) { saveAll() } }
+    DisposableEffect(Unit) { onDispose { onDraftState(false) {} } }
+    HyperPage(section.title, onBack = { leave(onBack) }, actions = {
+        TextButton(onClick = { saveAll() }, enabled = dirty) { Text(if (dirty) "保存" else "已保存") }
+    }) {
+        if (section == SettingsSection.ALL || section == SettingsSection.CONNECTION) {
+            GlassCard(d.glassAlpha) {
+                // 公告栏放最上面：换接口/换模型最该先知道的就是「这俩大概要等多久」
+                val (replyMs, riskMs) = store.probeMs()
+                Text("自检延迟：回复 ${if (replyMs > 0) "${replyMs}ms" else "未测试"}" + if (d.graded) " · 风险 ${if (riskMs > 0) "${riskMs}ms" else "未测试"}" else "", fontSize = 13.sp, color = palette.sub)
+                Spacer(Modifier.height(10.dp))
+                Text("接口地址", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+                Spacer(Modifier.height(8.dp))
 
-        // 这一页很长，页底那个红字常常不在视野里 —— 顶部也放一条，滚到哪儿都知道「有东西没存」。
-        // 只是提示，不强制：接口地址那种改一半的情况，本来就该由你决定什么时候存。
-        if (dirty) {
-            Text(
-                "⚠ 本页有未保存的改动（白名单 / 识图 / 生成模式是改完立刻生效，其余要按页底那个「保存」）",
-                fontSize = 13.sp,
-                color = palette.bad,
-                modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
-            )
-        }
-
-        GroupTitle("接入")
-
-        GlassCard(d.glassAlpha) {
-            // 公告栏放最上面：换接口/换模型最该先知道的就是「这俩大概要等多久」
-            val (replyMs, riskMs) = store.probeMs()
-            NoticeBanner(
-                title = "自检延迟（和接口、模型都有关）",
-                lines = buildList {
-                    add(if (replyMs > 0) "${d.model}（写回复）：${replyMs}ms" else "${d.model}（写回复）：还没测过")
-                    if (d.graded) {
-                        val m2 = d.model2.ifBlank { d.model }
-                        add(if (riskMs > 0) "$m2（风险）：${riskMs}ms" else "$m2（风险）：还没测过")
-                        if (replyMs > 0L && riskMs > 0L) {
-                            add("两路差 ${kotlin.math.abs(replyMs - riskMs)}ms —— 卡片要等慢的那一路")
-                        }
-                    }
-                    add("换接口或换模型都会让它变；回首页点「接口自检」重新测一次。")
-                },
-            )
-            Spacer(Modifier.height(10.dp))
-            Text("接口地址", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            Spacer(Modifier.height(8.dp))
-
-            // 服务商预设：**只省掉「去官网查地址」这一步**。选中后地址 / 模型照样能手改，
-            // 也不改变任何请求逻辑 —— 我们本来就是「OpenAI 兼容 + 自定义 base_url + 自定义 model」。
-            val chosenPreset = presetOf(d.provider)
-            var providerOpen by remember { mutableStateOf(false) }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("服务商", fontSize = 13.sp, color = palette.sub, modifier = Modifier.weight(1f))
-                Box {
-                    OutlinedButton(
-                        onClick = { providerOpen = true },
-                        shape = RoundedCornerShape(RadiusR1),
-                    ) { Text(chosenPreset?.label ?: "自定义（自己填）", fontSize = 13.sp) }
-                    DropdownMenu(expanded = providerOpen, onDismissRequest = { providerOpen = false }) {
-                        DropdownMenuItem(
-                            text = { Text("自定义（自己填）", fontSize = 13.sp) },
-                            onClick = {
-                                providerOpen = false
-                                update(d.copy(provider = ""))
-                            },
-                        )
-                        PROVIDER_PRESETS.forEach { p ->
+                // 服务商预设：**只省掉「去官网查地址」这一步**。选中后地址 / 模型照样能手改，
+                // 也不改变任何请求逻辑 —— 我们本来就是「OpenAI 兼容 + 自定义 base_url + 自定义 model」。
+                val chosenPreset = presetOf(d.provider)
+                var providerOpen by remember { mutableStateOf(false) }
+                Column {
+                    Text("服务商", fontSize = 13.sp, color = palette.sub)
+                    Spacer(Modifier.height(6.dp))
+                    Box(Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { providerOpen = true },
+                            shape = RoundedCornerShape(RadiusR1),
+                        ) { Text(chosenPreset?.label ?: "自定义（自己填）", fontSize = 13.sp) }
+                        DropdownMenu(expanded = providerOpen, onDismissRequest = { providerOpen = false }) {
                             DropdownMenuItem(
-                                text = { Text(p.label, fontSize = 13.sp) },
+                                text = { Text("自定义（自己填）", fontSize = 13.sp) },
                                 onClick = {
                                     providerOpen = false
-                                    // 选预设 = 把「地址 / 形态 / 模型（有才填）」写进草稿，仍然可改
-                                    update(
-                                        d.copy(
-                                            provider = p.id,
-                                            baseUrl = p.baseUrl,
-                                            apiShape = p.shape.id,
-                                            model = p.model.ifBlank { d.model },
-                                        ),
-                                    )
+                                    update(d.copy(provider = ""))
                                 },
                             )
-                        }
-                    }
-                }
-            }
-            chosenPreset?.note?.let {
-                Spacer(Modifier.height(4.dp))
-                Text(it, fontSize = 13.sp, color = palette.sub)
-            }
-            Spacer(Modifier.height(10.dp))
-
-            // 接口形态：差异只有 URL 路径 / 请求体 / 鉴权头三处（见 llm/ApiShape.kt）。
-            val shapeNow = shapeOf(d.apiShape)
-            var shapeOpen by remember { mutableStateOf(false) }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("接口形态", fontSize = 13.sp, color = palette.sub, modifier = Modifier.weight(1f))
-                Box {
-                    OutlinedButton(
-                        onClick = { shapeOpen = true },
-                        shape = RoundedCornerShape(RadiusR1),
-                    ) { Text(shapeNow.label, fontSize = 13.sp) }
-                    DropdownMenu(expanded = shapeOpen, onDismissRequest = { shapeOpen = false }) {
-                        ApiShape.values().forEach { s ->
-                            DropdownMenuItem(
-                                text = { Text(s.label, fontSize = 13.sp) },
-                                onClick = {
-                                    shapeOpen = false
-                                    update(d.copy(apiShape = s.id))
-                                },
-                            )
-                        }
-                    }
-                }
-            }
-            Text(shapeNow.note, fontSize = 13.sp, color = palette.sub)
-            if (d.proxyEnabled && !shapeNow.usableThroughProxy) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "⚠ 本地代理只转发 OpenAI 兼容形态：「${shapeNow.label}」请直连 —— " +
-                        "到下面把「本地代理」关掉，或者把形态换回 OpenAI 兼容。",
-                    fontSize = 13.sp,
-                    color = palette.warn,
-                )
-            }
-            if (shapeNow == ApiShape.CUSTOM) {
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    colors = glassFieldColors(),
-                    shape = RoundedCornerShape(RadiusR2),
-                    value = d.customPath,
-                    onValueChange = { update(d.copy(customPath = it)) },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("路径（留空 = 这个地址本身就是完整端点）") },
-                    singleLine = true,
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-
-            OutlinedTextField(
-                colors = glassFieldColors(),
-                shape = RoundedCornerShape(RadiusR2),
-                value = d.baseUrl,
-                onValueChange = { update(d.copy(baseUrl = it)) },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("接口地址（OpenAI 兼容，写到 /v1）") },
-                singleLine = true,
-            )
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                colors = glassFieldColors(),
-                shape = RoundedCornerShape(RadiusR2),
-                value = d.apiKey,
-                onValueChange = { update(d.copy(apiKey = it)) },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("API Key") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-            )
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                colors = glassFieldColors(),
-                shape = RoundedCornerShape(RadiusR2),
-                value = d.model,
-                onValueChange = { update(d.copy(model = it)) },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("模型") },
-                singleLine = true,
-            )
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedButton(
-                    onClick = { pullModels(second = false) },
-                    enabled = !pulling,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(RadiusR2),
-                ) { Text(if (pulling) "拉取中…" else "从服务端拉取模型列表") }
-                if (models.isNotEmpty()) {
-                    Spacer(Modifier.width(8.dp))
-                    Box {
-                        OutlinedButton(onClick = { modelsOpen = true }, shape = RoundedCornerShape(RadiusR2)) {
-                            Text("选模型（${models.size}）")
-                        }
-                        DropdownMenu(expanded = modelsOpen, onDismissRequest = { modelsOpen = false }) {
-                            orderedModels(models).take(80).forEach { id ->
+                            PROVIDER_PRESETS.forEach { p ->
                                 DropdownMenuItem(
-                                    text = { Text(id, fontSize = 13.sp) },
+                                    text = { Text(p.label, fontSize = 13.sp) },
                                     onClick = {
-                                        update(d.copy(model = id))
-                                        modelsOpen = false
+                                        providerOpen = false
+                                        // 选预设 = 把「地址 / 形态 / 模型（有才填）」写进草稿，仍然可改
+                                        update(
+                                            d.copy(
+                                                provider = p.id,
+                                                baseUrl = p.baseUrl,
+                                                apiShape = p.shape.id,
+                                                model = p.model.ifBlank { d.model },
+                                            ),
+                                        )
                                     },
                                 )
                             }
                         }
                     }
                 }
-            }
-            modelsNote?.let {
-                Spacer(Modifier.height(4.dp))
-                Text(it, fontSize = 13.sp, color = if (it.startsWith("拉取失败")) palette.bad else palette.ok)
-            }
-            if (modelsAt > 0L) {
-                Spacer(Modifier.height(2.dp))
-                Text("上次拉取 ${formatTime(modelsAt)}（存在本机；换了接口 / Key 记得重新拉一次）", fontSize = 10.sp, color = palette.sub)
-            }
-            Spacer(Modifier.height(4.dp))
-            HintText(
-                "拉不到不代表接口不能用：有的服务商没这个接口，有的中转只回一份目录（列出来 ≠ 你的 Key 能用）。手动填一样用。",
-                fontSize = 10.sp,
-                color = palette.sub,
-            )
-            Spacer(Modifier.height(12.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("严格 JSON 输出", fontSize = 15.sp, color = palette.text)
-                    HintText(
-                        "请求里带 response_format=json_object，让服务端保证回的是合法 JSON，" +
-                            "能少一些「模型没返回 JSON」。有些中转不支持 —— 开了报错就关掉。" +
-                            "只影响生成候选，不影响单条改写和风格提炼。",
-                        fontSize = 13.sp,
-                        color = palette.sub,
-                    )
+                chosenPreset?.note?.let {
+                    Spacer(Modifier.height(4.dp))
+                    Text(it, fontSize = 13.sp, color = palette.sub)
                 }
-                Switch(checked = d.jsonMode, onCheckedChange = { update(d.copy(jsonMode = it)) })
-            }
-            Spacer(Modifier.height(12.dp))
-            Text("单次回复的 token 上限", fontSize = 13.sp, color = palette.sub)
-            Spacer(Modifier.height(6.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                GlassPill("200", d.maxTokens == 200, Modifier.weight(1f)) { update(d.copy(maxTokens = 200)) }
-                GlassPill("400", d.maxTokens == 400, Modifier.weight(1f)) { update(d.copy(maxTokens = 400)) }
-                GlassPill("600", d.maxTokens == 600, Modifier.weight(1f)) { update(d.copy(maxTokens = 600)) }
-                GlassPill("无限制", d.maxTokens == 0, Modifier.weight(1f)) { update(d.copy(maxTokens = 0)) }
-            }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                if (d.maxTokens == 0) "无限制：请求里不带 max_tokens，由服务端决定（进阶 skill 建议用这档）"
-                else "越小越省额度，但 skill 提示词较长时可能被截断",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-        }
-
-        GlassCard(d.glassAlpha) {
-            Text("本地代理（API Key 不出本应用）", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            Text(
-                "开启后：聊天内容先送到本机的 127.0.0.1，由这个 App 带上 Key 去调你的接口。\n" +
-                    "注入到微信里的那段代码从此**拿不到 Key** —— 做法不是加密，是根本不给它。",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("启用本地代理", fontSize = 15.sp, color = palette.text)
-                    Text(
-                        if (d.proxyEnabled) {
-                            "已开：App 需要保持运行（前台服务 + 一条常驻通知）"
-                        } else {
-                            "关着：走直连（Key 明文存在本机，并且会推给微信进程）"
-                        },
-                        fontSize = 13.sp,
-                        color = palette.sub,
-                    )
-                }
-                Switch(
-                    checked = d.proxyEnabled,
-                    onCheckedChange = { on ->
-                        // 开关立刻落盘：注入侧是按配置里的 proxyEnabled 决定走哪条路的，
-                        // 等用户再点一次「保存」的话，这里会有一段「看起来开了其实没开」的空窗。
-                        store.save(d.copy(proxyEnabled = on))
-                        d = store.load()
-                        persisted = d
-                        if (on) {
-                            store.ensureProxyToken()
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
-                                PackageManager.PERMISSION_GRANTED
-                            ) {
-                                notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            }
-                            ProxyService.start(context)
-                            proxyNote = "已开启。到微信里试一次识别；如果一直失败，把这里关掉就退回直连。"
-                        } else {
-                            ProxyService.stop(context)
-                            proxyNote = "已关闭：Key 会重新推给微信进程（下次识别生效）。"
-                        }
-                    },
-                )
-            }
-            if (d.proxyEnabled) {
-                Spacer(Modifier.height(6.dp))
-                // 状态行直接读进程内的 ProxyState：服务到底起没起来、为什么没起来，一眼可见
-                Text(
-                    when {
-                        ProxyState.running ->
-                            "● 服务在跑：127.0.0.1:${ProxyState.port}" +
-                                (ProxyState.lastResult?.let { " · 最近：$it" } ?: " · 还没被请求过")
-                        ProxyState.lastError != null -> "● 服务没起来：${ProxyState.lastError}"
-                        else -> "● 服务没起来（点上面的开关关掉再开一次；若仍不行点「测试代理」看详情）"
-                    },
-                    fontSize = 13.sp,
-                    color = if (ProxyState.running) palette.ok else palette.bad,
-                )
-                val (lastRoute, lastRouteAt) = store.lastRoute()
-                if (lastRoute.isNotBlank() && lastRouteAt > 0L) {
-                    val ok = lastRoute == ProxyProtocol.ROUTE_PROXY
-                    Text(
-                        "微信侧最近一次走的是：" + (if (ok) "本地代理 ✅" else "直连（代理还没被用上）") +
-                            " · " + java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
-                                .format(java.util.Date(lastRouteAt)),
-                        fontSize = 13.sp,
-                        color = if (ok) palette.ok else palette.warn,
-                    )
-                } else {
-                    Text("微信侧还没回传过路线 —— 到微信里点一次「↻ 重新识别」就会有了", fontSize = 13.sp, color = palette.sub)
-                }
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "提示：识别结果**有缓存**（同一条消息不会重复调接口）。开了代理之后，" +
-                        "要对**新消息**点一次「↻ 重新识别」才会真正走代理。",
-                    fontSize = 13.sp,
-                    color = palette.sub,
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    colors = glassFieldColors(),
-                    shape = RoundedCornerShape(RadiusR2),
-                    value = d.proxyPort.toString(),
-                    onValueChange = { update(d.copy(proxyPort = it.toIntOrNull() ?: d.proxyPort)) },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("端口（1024-65535）") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            proxyNote = "测试中…"
-                            val port = d.proxyPort
-                            proxyScope.launch {
-                                proxyNote = withContext(Dispatchers.IO) {
-                                    runCatching {
-                                        val c = (java.net.URL("http://127.0.0.1:$port${ProxyProtocol.PATH_HEALTH}")
-                                            .openConnection() as java.net.HttpURLConnection)
-                                        c.connectTimeout = 3_000
-                                        c.readTimeout = 3_000
-                                        val code = c.responseCode
-                                        runCatching { c.disconnect() }
-                                        code
-                                    }.fold(
-                                        { code -> if (code == 200) "代理正常（HTTP 200）" else "代理回话：HTTP $code" },
-                                        { err ->
-                                            "连不上：${err.message}" + (
-                                                ProxyState.lastError?.let { " · 服务端说：$it" }
-                                                    ?: " · 服务没起来（把上面的开关关掉再打开一次）"
-                                                )
-                                        },
-                                    )
-                                }
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(RadiusR2),
-                    ) { Text("测试代理") }
-                    OutlinedButton(
-                        onClick = {
-                            store.resetProxyToken()
-                            d = store.load()
-                            proxyNote = "已换新 token（微信里下次识别生效）"
-                        },
-                        modifier = Modifier.weight(1f),
-                        shape = RoundedCornerShape(RadiusR2),
-                    ) { Text("换新 token") }
-                }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    "⚠ 微信进程对 http 明文的策略不归我们管：如果开了之后微信里识别一直失败，" +
-                        "把这里关掉就退回直连（注入侧给的报错里也会这么提示）。\n" +
-                        "重启手机后代理不会自己回来，打开一次 App 就会自动恢复。",
-                    fontSize = 13.sp,
-                    color = palette.warn,
-                )
-                Spacer(Modifier.height(4.dp))
-                HintText(
-                    "如果状态行显示「服务在跑」但过一会儿就没了：这个应用需要常驻，请把它加入系统的" +
-                        "「电池优化白名单 / 允许后台运行」（各家名字不同：华为「应用启动管理」、小米「省电策略·无限制」、" +
-                        "OPPO / vivo 类似）。",
-                    fontSize = 13.sp,
-                    color = palette.sub,
-                )
-            }
-            proxyNote?.let {
-                Spacer(Modifier.height(6.dp))
-                Text(it, fontSize = 13.sp, color = palette.sub)
-            }
-        }
-
-        GroupTitle("生成")
-
-        GlassCard(d.glassAlpha) {
-            Text("生成模式", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                GlassPill("直通（一套接口）", !d.graded, Modifier.weight(1f)) { saveGraded(false) }
-                GlassPill("模型分级", d.graded, Modifier.weight(1f)) { saveGraded(true) }
-            }
-            Spacer(Modifier.height(6.dp))
-            HintText(
-                if (!d.graded) {
-                    "直通：所有事都交给一套接口 + 一份提示词，一次调用搞定（默认，和以前一样）。"
-                } else {
-                    "分级：拆成两路**并行**跑 —— 一路只判意图与风险，另一路只写 3 条回复，最后合成一张卡片。" +
-                        "任一路挂了另一路照常显示（风险会标成「未评估」）。"
-                },
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "这两个 pill 点一下就生效（立刻落盘，不用等页底那个「保存」）；下面的接口地址仍然是草稿。",
-                fontSize = 13.sp,
-                color = palette.ok,
-            )
-            if (d.graded) {
                 Spacer(Modifier.height(10.dp))
-                Text("第二套接口（只给「风险评估」那一路用）", fontSize = 13.sp, color = palette.sub)
-                Spacer(Modifier.height(6.dp))
+
+                // 接口形态：差异只有 URL 路径 / 请求体 / 鉴权头三处（见 llm/ApiShape.kt）。
+                val shapeNow = shapeOf(d.apiShape)
+                var shapeOpen by remember { mutableStateOf(false) }
+                Column {
+                    Text("接口形态", fontSize = 13.sp, color = palette.sub)
+                    Spacer(Modifier.height(6.dp))
+                    Box(Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { shapeOpen = true },
+                            shape = RoundedCornerShape(RadiusR1),
+                        ) { Text(shapeNow.label, fontSize = 13.sp) }
+                        DropdownMenu(expanded = shapeOpen, onDismissRequest = { shapeOpen = false }) {
+                            ApiShape.values().forEach { s ->
+                                DropdownMenuItem(
+                                    text = { Text(s.label, fontSize = 13.sp) },
+                                    onClick = {
+                                        shapeOpen = false
+                                        update(d.copy(apiShape = s.id))
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+                Text(shapeNow.note, fontSize = 13.sp, color = palette.sub)
+                if (d.proxyEnabled && !shapeNow.usableThroughProxy) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "⚠ 本地代理只转发 OpenAI 兼容形态：「${shapeNow.label}」请直连 —— " +
+                            "请到「设置 → 识图与代理」关闭代理，或选择支持代理的接口形态。",
+                        fontSize = 13.sp,
+                        color = palette.warn,
+                    )
+                }
+                if (shapeNow == ApiShape.CUSTOM) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        colors = glassFieldColors(),
+                        shape = RoundedCornerShape(RadiusR2),
+                        value = d.customPath,
+                        onValueChange = { update(d.copy(customPath = it)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("路径（留空 = 这个地址本身就是完整端点）") },
+                        singleLine = true,
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+
                 OutlinedTextField(
                     colors = glassFieldColors(),
                     shape = RoundedCornerShape(RadiusR2),
-                    value = d.baseUrl2,
-                    onValueChange = { update(d.copy(baseUrl2 = it)) },
+                    value = d.baseUrl,
+                    onValueChange = { update(d.copy(baseUrl = it)) },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("接口地址（留空 = 复用上面那套）") },
+                    label = { Text("接口地址（OpenAI 兼容，写到 /v1）") },
                     singleLine = true,
                 )
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     colors = glassFieldColors(),
                     shape = RoundedCornerShape(RadiusR2),
-                    value = d.apiKey2,
-                    onValueChange = { update(d.copy(apiKey2 = it)) },
+                    value = d.apiKey,
+                    onValueChange = { update(d.copy(apiKey = it)) },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("API Key（留空 = 复用）") },
+                    label = { Text("API Key") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
                 )
@@ -2083,33 +906,33 @@ fun AdvancedScreen(
                 OutlinedTextField(
                     colors = glassFieldColors(),
                     shape = RoundedCornerShape(RadiusR2),
-                    value = d.model2,
-                    onValueChange = { update(d.copy(model2 = it)) },
+                    value = d.model,
+                    onValueChange = { update(d.copy(model = it)) },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("模型（留空 = 复用）") },
+                    label = { Text("模型") },
                     singleLine = true,
                 )
                 Spacer(Modifier.height(8.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(
-                        onClick = { pullModels(second = true) },
-                        enabled = !pulling2,
+                        onClick = { pullModels(second = false) },
+                        enabled = !pulling,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(RadiusR2),
-                    ) { Text(if (pulling2) "拉取中…" else "从服务端拉取模型列表（第二套）") }
-                    if (models2.isNotEmpty()) {
+                    ) { Text(if (pulling) "拉取中…" else "获取模型列表") }
+                    if (models.isNotEmpty()) {
                         Spacer(Modifier.width(8.dp))
                         Box {
-                            OutlinedButton(onClick = { models2Open = true }, shape = RoundedCornerShape(RadiusR2)) {
-                                Text("选模型（${models2.size}）")
+                            OutlinedButton(onClick = { modelsOpen = true }, shape = RoundedCornerShape(RadiusR2)) {
+                                Text("选模型（${models.size}）")
                             }
-                            DropdownMenu(expanded = models2Open, onDismissRequest = { models2Open = false }) {
-                                orderedModels(models2).take(80).forEach { id ->
+                            DropdownMenu(expanded = modelsOpen, onDismissRequest = { modelsOpen = false }) {
+                                orderedModels(models).take(80).forEach { id ->
                                     DropdownMenuItem(
                                         text = { Text(id, fontSize = 13.sp) },
                                         onClick = {
-                                            update(d.copy(model2 = id))
-                                            models2Open = false
+                                            update(d.copy(model = id))
+                                            modelsOpen = false
                                         },
                                     )
                                 }
@@ -2117,481 +940,713 @@ fun AdvancedScreen(
                         }
                     }
                 }
-                modelsNote2?.let {
+                modelsNote?.let {
                     Spacer(Modifier.height(4.dp))
                     Text(it, fontSize = 13.sp, color = if (it.startsWith("拉取失败")) palette.bad else palette.ok)
                 }
-                if (models2At > 0L) {
+                if (modelsAt > 0L) {
                     Spacer(Modifier.height(2.dp))
-                    Text("上次拉取 ${formatTime(models2At)}（存在本机）", fontSize = 10.sp, color = palette.sub)
+                    Text("列表更新于 ${formatTime(modelsAt)}", fontSize = 10.sp, color = palette.sub)
                 }
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    "拉取用的是第二套自己的地址 / Key；这两格也留空的话，就跟第一套一模一样。",
+                HintText(
+                    "不支持模型列表的服务商可直接手动填写。",
                     fontSize = 10.sp,
                     color = palette.sub,
                 )
-                Spacer(Modifier.height(8.dp))
-                GlassPill("同上（三格都清空 = 复用第一套）", false, Modifier.fillMaxWidth()) {
-                    update(d.copy(baseUrl2 = "", apiKey2 = "", model2 = ""))
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("严格 JSON 输出", fontSize = 15.sp, color = palette.text)
+                        HintText(
+                            "要求服务商返回合法 JSON；接口不支持时请关闭。",
+                            fontSize = 13.sp,
+                            color = palette.sub,
+                        )
+                    }
+                    Switch(checked = d.jsonMode, onCheckedChange = { update(d.copy(jsonMode = it)) })
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("单次回复的 token 上限", fontSize = 13.sp, color = palette.sub)
+                Spacer(Modifier.height(6.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    GlassPill("200", d.maxTokens == 200, Modifier.weight(1f)) { update(d.copy(maxTokens = 200)) }
+                    GlassPill("400", d.maxTokens == 400, Modifier.weight(1f)) { update(d.copy(maxTokens = 400)) }
+                    GlassPill("600", d.maxTokens == 600, Modifier.weight(1f)) { update(d.copy(maxTokens = 600)) }
+                    GlassPill("无限制", d.maxTokens == 0, Modifier.weight(1f)) { update(d.copy(maxTokens = 0)) }
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    "留空就复用第一套 —— 那等于「同一个模型拆两路提示词」，也完全能用。" +
-                        "想省钱可以给风险那一路单独配个便宜的小模型（比如轻量档）。" +
-                        "第二套不参与首页的「接口自检」，配错了会在卡片上直接写出来。",
+                    if (d.maxTokens == 0) "由服务端决定回复长度"
+                    else "越小越省额度，但 skill 提示词较长时可能被截断",
                     fontSize = 13.sp,
                     color = palette.sub,
                 )
             }
         }
-
-        GroupTitle("识别")
-
-        GlassCard(d.glassAlpha) {
-            Text("图片文字识别（OCR）", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            Text(
-                "聊天里的图片会先在这台手机上认成文字，再和别的消息一起交给模型 —— " +
-                    "截图、长图里的话也能被读懂。\n" +
-                    "认字完全离线：内置的中文模型，不联网、不下载、不需要 Play 服务，图片也不会上传" +
-                    "（只在本机两个进程之间走一趟）。代价是这个安装包大了十几 MB。",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("识别聊天里的图片", fontSize = 15.sp, color = palette.text)
-                    Text(
-                        if (d.ocrEnabled) {
-                            "开着：每轮分析前，屏幕上的图会先认一遍字"
-                        } else {
-                            "关着：图片还是老样子 —— 用 [图片/表情/语音] 占位"
-                        },
-                        fontSize = 13.sp,
-                        color = palette.sub,
-                    )
-                }
-                Switch(
-                    checked = d.ocrEnabled,
-                    onCheckedChange = { on ->
-                        saveOcr(on)
-                        ocrNote = if (on) "已开 · 微信里下次识别生效" else "已关 · 图片回落成占位"
-                    },
-                )
-            }
-            if (d.ocrEnabled && !d.proxyEnabled) {
-                Spacer(Modifier.height(6.dp))
+        if (section == SettingsSection.ALL || section == SettingsSection.RECOGNITION) {
+            GlassCard(d.glassAlpha) {
+                Text("图片文字识别（OCR）", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
                 Text(
-                    "⚠ 还差一步：认字这件事在 App 进程里做，所以得先把上面那张卡的「本地代理」打开 —— " +
-                        "否则微信那边连不上本机端口，会直接跳过（图片仍是占位）。",
+                    "图片在本机离线识别，不上传、不落盘。识别的文字会随上下文发送给模型。",
                     fontSize = 13.sp,
-                    color = palette.warn,
+                    color = palette.sub,
                 )
-            }
-            Spacer(Modifier.height(8.dp))
-            Text("最近一次：$ocrStatus", fontSize = 13.sp, color = palette.sub)
-            ocrNote?.let {
-                Spacer(Modifier.height(4.dp))
-                Text(it, fontSize = 13.sp, color = palette.ok)
-            }
-        }
-
-        GroupTitle("微信内")
-
-        GlassCard(d.glassAlpha) {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(
-                    colors = glassFieldColors(),
-                    shape = RoundedCornerShape(RadiusR2),
-                    value = d.ctx.toString(),
-                    onValueChange = { update(d.copy(ctx = it.toIntOrNull() ?: d.ctx)) },
-                    modifier = Modifier.weight(1f),
-                    label = { Text("参考条数 2-20") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                )
-                OutlinedTextField(
-                    colors = glassFieldColors(),
-                    shape = RoundedCornerShape(RadiusR2),
-                    value = d.minIntervalSec.toString(),
-                    onValueChange = { update(d.copy(minIntervalSec = it.toIntOrNull() ?: d.minIntervalSec)) },
-                    modifier = Modifier.weight(1f),
-                    label = { Text("最短间隔(s)") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                )
-            }
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                colors = glassFieldColors(),
-                shape = RoundedCornerShape(RadiusR2),
-                value = d.temperature.toString(),
-                onValueChange = { update(d.copy(temperature = it.toDoubleOrNull() ?: d.temperature)) },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("temperature（0.2 稳 / 0.8 活）") },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-            )
-            Spacer(Modifier.height(10.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("微信内自动分析", fontSize = 15.sp, color = palette.text)
-                    Text("关掉后只在手动点「识别」时出现卡片", fontSize = 13.sp, color = palette.sub)
-                }
-                Switch(checked = d.enabled, onCheckedChange = { update(d.copy(enabled = it)) })
-            }
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("敏感内容检查", fontSize = 15.sp, color = palette.text)
-                    Text("命中验证码/银行卡/转账时先拦一次（推荐开）", fontSize = 13.sp, color = palette.sub)
-                }
-                Switch(checked = !d.allowSensitive, onCheckedChange = { update(d.copy(allowSensitive = !it)) })
-            }
-            Spacer(Modifier.height(14.dp))
-            // 这一页只有这一个保存按钮，而接口地址 / 生成模式 / 参考条数 / temperature 全是草稿 ——
-            // 不点它就一概不生效。所以红字必须挨着它，别让人以为改完就已经算数了。
-            if (dirty) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "未保存，你所做出的改动不会被保存",
-                        modifier = Modifier.weight(1f),
-                        fontSize = 13.sp,
-                        color = palette.bad,
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Button(
-                        onClick = { saveAll() },
-                        modifier = Modifier.height(46.dp),
-                        shape = RoundedCornerShape(RadiusR2),
-                        colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                    ) { Text("保存") }
-                }
-            } else {
-                Button(
-                    onClick = { saveAll() },
-                    modifier = Modifier.fillMaxWidth().height(50.dp),
-                    shape = RoundedCornerShape(RadiusR2),
-                    colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                ) { Text("已保存（微信里下次识别即生效）") }
-            }
-        }
-
-        GlassCard(d.glassAlpha) {
-            Text("会话白名单", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            // 白底说明卡放最上面：这一页最容易踩的坑（名字对不上、开关开着名单空着）先说清楚。
-            // 白卡和玻璃卡刻意不同 —— 玻璃是界面的一部分，白卡是「贴上去的说明书」。
-            WhiteCard {
-                Text("怎么用", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = Color(0xFF1C1B22))
-                listOf(
-                    "打开开关后，只有名单里的聊天会触发小助手；不在名单里的，不读内容、不记角色、也不调接口。",
-                    "加名字三种办法：① 下面的输入框手打；② 点「拉取会话列表」，回微信的首页 / 通讯录停两秒；" +
-                        "③ 白名单开着时，打开某个聊天，它的名字会自己进来。",
-                    "开关和增删都是改完立刻生效 —— 这张卡没有「保存」按钮。",
-                ).forEach { line ->
-                    Text(
-                        "· $line",
-                        fontSize = 13.sp,
-                        color = Color(0xFF55525E),
-                        modifier = Modifier.padding(top = 3.dp),
-                    )
-                }
-                Spacer(Modifier.height(6.dp))
-                Text("⚠ 注意事项", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = Color(0xFFB3261E))
-                listOf(
-                    "名字要和微信里显示的一致：群聊填群名；改过备注 / 昵称的，用改过之后的名字。",
-                    "认不出会话名的聊天按「没勾」处理 —— 宁可不动，也不误发。",
-                    "开关开着、名单却是空的 = 所有聊天都不工作。",
-                    "个人资料页不是来源：那一页只有「微信号 / 地区」这类字段，读出来全是杂项。",
-                    "拉取时要停在微信的列表页（首页 / 通讯录）；聊天页里读到的是消息正文，不是名字。",
-                    "白名单关着时，模块不收集任何会话名（不打算用它的人，不会被攒一份联系人名单）。",
-                    "移出白名单只是不再分析它；已经记下的角色和聊天记录不会被删掉。",
-                ).forEach { line ->
-                    Text(
-                        "· $line",
-                        fontSize = 13.sp,
-                        color = Color(0xFF55525E),
-                        modifier = Modifier.padding(top = 3.dp),
-                    )
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("只对白名单里的聊天生效", fontSize = 15.sp, color = palette.text)
-                    Text(
-                        if (d.whitelistEnabled) {
-                            "已开：只有下面 ${d.whitelist.size} 个会话会工作"
-                        } else {
-                            "关着：所有聊天都会分析（默认）"
-                        },
-                        fontSize = 13.sp,
-                        color = palette.sub,
-                    )
-                }
-                Switch(
-                    checked = d.whitelistEnabled,
-                    onCheckedChange = { on ->
-                        saveWhitelist(on, d.whitelist)
-                        whitelistNote = if (on) {
-                            if (d.whitelist.isEmpty()) "已开，但名单还是空的 —— 等于所有聊天都不工作"
-                            else "已开 · 只对下面这几个会话生效"
-                        } else {
-                            "已关 · 所有聊天都会分析"
-                        }
-                    },
-                )
-            }
-            if (d.whitelistEnabled) {
                 Spacer(Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        colors = glassFieldColors(),
-                        shape = RoundedCornerShape(RadiusR2),
-                        value = newChat,
-                        onValueChange = { newChat = it },
-                        modifier = Modifier.weight(1f),
-                        label = { Text("写微信里显示的那个名字") },
-                        singleLine = true,
-                    )
-                    Button(
-                        onClick = {
-                            val k = Roles.normalizeKey(newChat)
-                            if (k.isNotBlank()) {
-                                saveWhitelist(d.whitelistEnabled, d.whitelist + k)
-                                whitelistNote = "已加入「$k」"
-                                newChat = ""
-                            }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("识别聊天里的图片", fontSize = 15.sp, color = palette.text)
+                        Text(
+                            if (d.ocrEnabled) {
+                                "开着：每轮分析前，屏幕上的图会先认一遍字"
+                            } else {
+                                "关着：图片还是老样子 —— 用 [图片/表情/语音] 占位"
+                            },
+                            fontSize = 13.sp,
+                            color = palette.sub,
+                        )
+                    }
+                    Switch(
+                        checked = d.ocrEnabled,
+                        onCheckedChange = { on ->
+                            saveOcr(on)
+                            ocrNote = if (on) "已开 · 微信里下次识别生效" else "已关 · 图片回落成占位"
                         },
-                        shape = RoundedCornerShape(RadiusR2),
-                        colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                    ) { Text("添加") }
+                    )
                 }
-                if (d.whitelist.isEmpty()) {
+                if (d.ocrEnabled && !d.proxyEnabled) {
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "还是空的 —— 开着白名单却一条都没加，等于所有聊天都不工作。",
+                        "识图需要本地代理，请在下方启用。代理不可用时会保留图片占位。",
                         fontSize = 13.sp,
                         color = palette.warn,
                     )
-                } else {
-                    Spacer(Modifier.height(6.dp))
-                    val whiteList = d.whitelist.sorted()
-                if (whitePicking) {
-                    PickBar(
-                        count = whitePicked.size,
-                        total = whiteList.size,
-                        palette = palette,
-                        primaryLabel = "移出白名单",
-                        onPrimary = {
-                            val gone = whitePicked
-                            saveWhitelist(d.whitelistEnabled, d.whitelist - gone)
-                            whitelistNote = "已移出 ${gone.size} 个"
-                            whitePicked = emptySet()
-                            whitePicking = false
-                        },
-                        dangerLabel = "删除（不再出现）",
-                        onDanger = {
-                            val gone = whitePicked
-                            saveWhitelist(d.whitelistEnabled, d.whitelist - gone)
-                            store.ignoreChats(gone)
-                            ignoredCount = store.chatIgnored().size
-                            whitelistNote = "已删除 ${gone.size} 个，以后拉取不再出现"
-                            whitePicked = emptySet()
-                            whitePicking = false
-                        },
-                        onSelectAll = {
-                            whitePicked = if (whitePicked.size == whiteList.size) emptySet() else whiteList.toSet()
-                        },
-                        onCancel = {
-                            whitePicked = emptySet()
-                            whitePicking = false
-                        },
-                    )
-                    Spacer(Modifier.height(6.dp))
                 }
-                whiteList.forEach { name ->
-                    PickRow(
-                        label = name,
-                        picking = whitePicking,
-                        selected = name in whitePicked,
-                        palette = palette,
-                        actionLabel = "移除",
-                        actionColor = palette.bad,
-                        onToggle = {
-                            whitePicked = if (name in whitePicked) whitePicked - name else whitePicked + name
-                        },
-                        onLongPress = {
-                            whitePicking = true
-                            whitePicked = whitePicked + name
-                        },
-                        onAction = {
-                            saveWhitelist(d.whitelistEnabled, d.whitelist - name)
-                            whitelistNote = "已移除「$name」"
-                        },
-                    )
+                Spacer(Modifier.height(8.dp))
+                Text("最近一次：$ocrStatus", fontSize = 13.sp, color = palette.sub)
+                ocrNote?.let {
+                    Spacer(Modifier.height(4.dp))
+                    Text(it, fontSize = 13.sp, color = palette.ok)
                 }
-                Text("长按任意一项可多选，然后一次移出 / 删除。", fontSize = 13.sp, color = palette.sub)
-                }
-                Spacer(Modifier.height(6.dp))
-                HintText(
-                    "名字要和微信里显示的一致（群聊填群名；改过备注的用改过的名字）；懒得敲字就用下面的「拉取会话列表」。",
+            }
+        }
+        if (section == SettingsSection.ALL || section == SettingsSection.RECOGNITION) {
+            GlassCard(d.glassAlpha) {
+                Text("本地代理（API Key 不出本应用）", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+                Text(
+                    "使用本机代理转发请求，API Key 仅保留在本应用。",
                     fontSize = 13.sp,
                     color = palette.sub,
                 )
-            }
-
-            Spacer(Modifier.height(12.dp))
-            Text("从微信里列出来", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = palette.text)
-            HintText(
-                "点一下，然后回微信的首页或通讯录停两秒（滚一下能多收几个），再回来打开下面的「拉取到的联系人」去挑。\n" +
-                    "白名单开着的时候，你打开过的那个聊天也会自己进来（认的是聊天页顶上那个名字，也就是备注）。\n" +
-                    "⚠ 个人资料页不是来源 —— 那一页只有「微信号 / 地区」这种字段，读出来全是杂项，别在那里等。",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = {
-                        store.requestChats()
-                        whitelistNote = "已请求 · 回微信首页 / 通讯录停两秒，再回来这里看"
-                    },
-                    modifier = Modifier.height(44.dp),
-                    shape = RoundedCornerShape(RadiusR2),
-                    colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                ) { Text("拉取会话列表") }
-                Text(pullInfo, fontSize = 13.sp, color = palette.sub, modifier = Modifier.weight(1f))
-            }
-            val todo = cands.filter { it !in d.whitelist }
-            Spacer(Modifier.height(10.dp))
-            // 名单本身搬到二级页了：拉到几十个名字时铺在卡里会把整页撑得很长，也没法搜。
-            // 这里只留一个入口 + 数量。
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(RadiusR2))
-                    .background(palette.primary.copy(alpha = ChipBgAlpha))
-                    .clickable { onOpenCandidates() }
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("拉取到的联系人（${cands.size}）", fontSize = 14.sp, color = palette.text)
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("启用本地代理", fontSize = 15.sp, color = palette.text)
+                        Text(
+                            if (d.proxyEnabled) {
+                                "已开：App 需要保持运行（前台服务 + 一条常驻通知）"
+                            } else {
+                                "关着：走直连（Key 明文存在本机，并且会推给微信进程）"
+                            },
+                            fontSize = 13.sp,
+                            color = palette.sub,
+                        )
+                    }
+                    Switch(
+                        checked = d.proxyEnabled,
+                        onCheckedChange = { on ->
+                            // 开关立刻落盘：注入侧是按配置里的 proxyEnabled 决定走哪条路的，
+                            // 等用户再点一次「保存」的话，这里会有一段「看起来开了其实没开」的空窗。
+                            store.save(d.copy(proxyEnabled = on))
+                            d = store.load()
+                            persisted = d
+                            if (on) {
+                                store.ensureProxyToken()
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+                                    PackageManager.PERMISSION_GRANTED
+                                ) {
+                                    notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                                ProxyService.start(context)
+                                proxyNote = "已开启。到微信里试一次识别；如果一直失败，把这里关掉就退回直连。"
+                            } else {
+                                ProxyService.stop(context)
+                                proxyNote = "已关闭：Key 会重新推给微信进程（下次识别生效）。"
+                            }
+                        },
+                    )
+                }
+                if (d.proxyEnabled) {
+                    Spacer(Modifier.height(6.dp))
+                    // 状态行直接读进程内的 ProxyState：服务到底起没起来、为什么没起来，一眼可见
                     Text(
                         when {
-                            cands.isEmpty() -> "还没收到候选 —— 点上面的按钮，然后去微信首页 / 通讯录停两秒"
-                            todo.isEmpty() -> "拉回来的都加进去了 · 点开可以搜、也可以移出"
-                            else -> "还没加进去的 ${todo.size} 个 · 点开可以搜索、批量加入"
+                            ProxyState.running ->
+                                "● 服务在跑：127.0.0.1:${ProxyState.port}" +
+                                    (ProxyState.lastResult?.let { " · 最近：$it" } ?: " · 还没被请求过")
+                            ProxyState.lastError != null -> "● 服务没起来：${ProxyState.lastError}"
+                            else -> "● 服务没起来（点上面的开关关掉再开一次；若仍不行点「测试代理」看详情）"
                         },
                         fontSize = 13.sp,
+                        color = if (ProxyState.running) palette.ok else palette.bad,
+                    )
+                    val (lastRoute, lastRouteAt) = store.lastRoute()
+                    if (lastRoute.isNotBlank() && lastRouteAt > 0L) {
+                        val ok = lastRoute == ProxyProtocol.ROUTE_PROXY
+                        Text(
+                            "微信侧最近一次走的是：" + (if (ok) "本地代理 ✅" else "直连（代理还没被用上）") +
+                                " · " + java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
+                                    .format(java.util.Date(lastRouteAt)),
+                            fontSize = 13.sp,
+                            color = if (ok) palette.ok else palette.warn,
+                        )
+                    } else {
+                        Text("尚未收到微信侧的路由记录", fontSize = 13.sp, color = palette.sub)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "同屏结果会缓存；可在微信中手动重新识别。",
+                        fontSize = 13.sp,
+                        color = palette.sub,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        colors = glassFieldColors(),
+                        shape = RoundedCornerShape(RadiusR2),
+                        value = d.proxyPort.toString(),
+                        onValueChange = { update(d.copy(proxyPort = it.toIntOrNull() ?: d.proxyPort)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("端口（1024-65535）") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                proxyNote = "测试中…"
+                                val port = d.proxyPort
+                                proxyScope.launch {
+                                    proxyNote = withContext(Dispatchers.IO) {
+                                        runCatching {
+                                            val c = (java.net.URL("http://127.0.0.1:$port${ProxyProtocol.PATH_HEALTH}")
+                                                .openConnection() as java.net.HttpURLConnection)
+                                            c.connectTimeout = 3_000
+                                            c.readTimeout = 3_000
+                                            val code = c.responseCode
+                                            runCatching { c.disconnect() }
+                                            code
+                                        }.fold(
+                                            { code -> if (code == 200) "代理正常（HTTP 200）" else "代理回话：HTTP $code" },
+                                            { err ->
+                                                "连不上：${err.message}" + (
+                                                    ProxyState.lastError?.let { " · 服务端说：$it" }
+                                                        ?: " · 服务没起来（把上面的开关关掉再打开一次）"
+                                                    )
+                                            },
+                                        )
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(RadiusR2),
+                        ) { Text("测试代理") }
+                        OutlinedButton(
+                            onClick = {
+                                store.resetProxyToken()
+                                d = store.load()
+                                proxyNote = "已换新 token（微信里下次识别生效）"
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(RadiusR2),
+                        ) { Text("换新 token") }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "⚠ 微信进程对 http 明文的策略不归我们管：如果开了之后微信里识别一直失败，" +
+                            "把这里关掉就退回直连（注入侧给的报错里也会这么提示）。\n" +
+                            "重启手机后代理不会自己回来，打开一次 App 就会自动恢复。",
+                        fontSize = 13.sp,
+                        color = palette.warn,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    HintText(
+                        "如服务被系统回收，请允许应用后台运行。",
+                        fontSize = 13.sp,
                         color = palette.sub,
                     )
                 }
-                Text("查看 ›", fontSize = 13.sp, color = palette.primary)
-            }
-            if (ignoredCount > 0) {
-                Spacer(Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "已忽略 $ignoredCount 个（删掉的杂项）",
-                        fontSize = 13.sp,
-                        color = palette.sub,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        "恢复",
-                        fontSize = 13.sp,
-                        color = palette.primary,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(RadiusR1))
-                            .clickable {
-                                store.clearIgnored()
-                                ignoredCount = 0
-                                whitelistNote = "已恢复：删掉的候选下次拉取会重新出现"
-                            }
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
-                    )
+                proxyNote?.let {
+                    Spacer(Modifier.height(6.dp))
+                    Text(it, fontSize = 13.sp, color = palette.sub)
                 }
-            }
-            whitelistNote?.let {
-                Spacer(Modifier.height(6.dp))
-                Text(it, fontSize = 13.sp, color = palette.ok)
             }
         }
-
-        GroupTitle("维护与排障")
-
-        GlassCard(d.glassAlpha) {
-            Text("备份 / 迁移", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            Text(
-                "换包名、换手机的时候用：导出成一个 json 文件，装好新的再导入回来。\n" +
-                    "导入是合并：角色只覆盖同名的，备份里没有的会保留。",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("导出时包含 API Key", fontSize = 13.sp, color = palette.text)
-                    Text("开了的话导出文件里有明文 Key，别往公开地方放", fontSize = 13.sp, color = palette.sub)
+        if (section == SettingsSection.ALL || section == SettingsSection.GENERATION) {
+            GlassCard(d.glassAlpha) {
+                Text("生成模式", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    GlassPill("直通（一套接口）", !d.graded, Modifier.weight(1f)) { saveGraded(false) }
+                    GlassPill("模型分级", d.graded, Modifier.weight(1f)) { saveGraded(true) }
                 }
-                Switch(checked = includeKey, onCheckedChange = { includeKey = it })
+                Spacer(Modifier.height(6.dp))
+                HintText(
+                    if (!d.graded) {
+                        "一套接口完成意图、风险与候选回复。"
+                    } else {
+                        "风险与回复由两路接口并行处理，任一路失败仍保留另一路结果。"
+                    },
+                    fontSize = 13.sp,
+                    color = palette.sub,
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "模式切换立即生效；接口修改需保存。",
+                    fontSize = 13.sp,
+                    color = palette.ok,
+                )
+                if (d.graded) {
+                    Spacer(Modifier.height(10.dp))
+                    Text("第二套接口（只给「风险评估」那一路用）", fontSize = 13.sp, color = palette.sub)
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedTextField(
+                        colors = glassFieldColors(),
+                        shape = RoundedCornerShape(RadiusR2),
+                        value = d.baseUrl2,
+                        onValueChange = { update(d.copy(baseUrl2 = it)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("接口地址（留空 = 复用上面那套）") },
+                        singleLine = true,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        colors = glassFieldColors(),
+                        shape = RoundedCornerShape(RadiusR2),
+                        value = d.apiKey2,
+                        onValueChange = { update(d.copy(apiKey2 = it)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("API Key（留空 = 复用）") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        colors = glassFieldColors(),
+                        shape = RoundedCornerShape(RadiusR2),
+                        value = d.model2,
+                        onValueChange = { update(d.copy(model2 = it)) },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("模型（留空 = 复用）") },
+                        singleLine = true,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedButton(
+                            onClick = { pullModels(second = true) },
+                            enabled = !pulling2,
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(RadiusR2),
+                        ) { Text(if (pulling2) "拉取中…" else "获取风险模型列表") }
+                        if (models2.isNotEmpty()) {
+                            Spacer(Modifier.width(8.dp))
+                            Box {
+                                OutlinedButton(onClick = { models2Open = true }, shape = RoundedCornerShape(RadiusR2)) {
+                                    Text("选模型（${models2.size}）")
+                                }
+                                DropdownMenu(expanded = models2Open, onDismissRequest = { models2Open = false }) {
+                                    orderedModels(models2).take(80).forEach { id ->
+                                        DropdownMenuItem(
+                                            text = { Text(id, fontSize = 13.sp) },
+                                            onClick = {
+                                                update(d.copy(model2 = id))
+                                                models2Open = false
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    modelsNote2?.let {
+                        Spacer(Modifier.height(4.dp))
+                        Text(it, fontSize = 13.sp, color = if (it.startsWith("拉取失败")) palette.bad else palette.ok)
+                    }
+                    if (models2At > 0L) {
+                        Spacer(Modifier.height(2.dp))
+                        Text("上次拉取 ${formatTime(models2At)}（存在本机）", fontSize = 10.sp, color = palette.sub)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "拉取用的是第二套自己的地址 / Key；这两格也留空的话，就跟第一套一模一样。",
+                        fontSize = 10.sp,
+                        color = palette.sub,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    GlassPill("复用第一套接口", false, Modifier.fillMaxWidth()) {
+                        update(d.copy(baseUrl2 = "", apiKey2 = "", model2 = ""))
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "地址、Key、模型可分别留空，缺项会复用第一套。",
+                        fontSize = 13.sp,
+                        color = palette.sub,
+                    )
+                }
             }
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        }
+        if (section == SettingsSection.ALL || section == SettingsSection.WECHAT) {
+            GlassCard(d.glassAlpha) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        colors = glassFieldColors(),
+                        shape = RoundedCornerShape(RadiusR2),
+                        value = d.ctx.toString(),
+                        onValueChange = { update(d.copy(ctx = it.toIntOrNull() ?: d.ctx)) },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("参考消息数（2–20）") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    )
+                    OutlinedTextField(
+                        colors = glassFieldColors(),
+                        shape = RoundedCornerShape(RadiusR2),
+                        value = d.minIntervalSec.toString(),
+                        onValueChange = { update(d.copy(minIntervalSec = it.toIntOrNull() ?: d.minIntervalSec)) },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("请求间隔（秒）") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    colors = glassFieldColors(),
+                    shape = RoundedCornerShape(RadiusR2),
+                    value = d.temperature.toString(),
+                    onValueChange = { update(d.copy(temperature = it.toDoubleOrNull() ?: d.temperature)) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("创造性（temperature）") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("微信内自动分析", fontSize = 15.sp, color = palette.text)
+                        Text("关掉后只在手动点「识别」时出现卡片", fontSize = 13.sp, color = palette.sub)
+                    }
+                    Switch(checked = d.enabled, onCheckedChange = { update(d.copy(enabled = it)) })
+                }
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("敏感内容检查", fontSize = 15.sp, color = palette.text)
+                        Text("命中验证码/银行卡/转账时先拦一次（推荐开）", fontSize = 13.sp, color = palette.sub)
+                    }
+                    Switch(checked = !d.allowSensitive, onCheckedChange = { update(d.copy(allowSensitive = !it)) })
+                }
+                Spacer(Modifier.height(14.dp))
+                Text("修改后点右上角保存。", fontSize = 13.sp, color = palette.sub)
+
+            }
+        }
+        if (section == SettingsSection.ALL || section == SettingsSection.WHITELIST) {
+            GlassCard(d.glassAlpha) {
+                Text("会话白名单", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+                // 白底说明卡放最上面：这一页最容易踩的坑（名字对不上、开关开着名单空着）先说清楚。
+                // 白卡和玻璃卡刻意不同 —— 玻璃是界面的一部分，白卡是「贴上去的说明书」。
+                Text("仅处理选定会话。开启后，空名单或无法识别名称的会话均不处理。", fontSize = 13.sp, color = palette.sub)
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("只对白名单里的聊天生效", fontSize = 15.sp, color = palette.text)
+                        Text(
+                            if (d.whitelistEnabled) {
+                                "已开：只有下面 ${d.whitelist.size} 个会话会工作"
+                            } else {
+                                "关着：所有聊天都会分析（默认）"
+                            },
+                            fontSize = 13.sp,
+                            color = palette.sub,
+                        )
+                    }
+                    Switch(
+                        checked = d.whitelistEnabled,
+                        onCheckedChange = { on ->
+                            saveWhitelist(on, d.whitelist)
+                            whitelistNote = if (on) {
+                                if (d.whitelist.isEmpty()) "已开，但名单还是空的 —— 等于所有聊天都不工作"
+                                else "已开 · 只对下面这几个会话生效"
+                            } else {
+                                "已关 · 所有聊天都会分析"
+                            }
+                        },
+                    )
+                }
+                if (d.whitelistEnabled) {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        GlassPill("微信", newChatHost == ChatHost.WECHAT, Modifier.weight(1f)) { newChatHost = ChatHost.WECHAT }
+                        GlassPill("QQ", newChatHost == ChatHost.QQ, Modifier.weight(1f)) { newChatHost = ChatHost.QQ }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            colors = glassFieldColors(),
+                            shape = RoundedCornerShape(RadiusR2),
+                            value = newChat,
+                            onValueChange = { newChat = it },
+                            modifier = Modifier.weight(1f),
+                            label = { Text("${newChatHost.label} 中显示的名称（最多 32 字）") },
+                            singleLine = true,
+                        )
+                        Button(
+                            onClick = {
+                                val k = newChatHost.conversationKey(newChat)
+                                if (k.isNotBlank()) {
+                                    saveWhitelist(d.whitelistEnabled, d.whitelist + k)
+                                    whitelistNote = "已加入「${conversationDisplayName(k)}」"
+                                    newChat = ""
+                                }
+                            },
+                            shape = RoundedCornerShape(RadiusR2),
+                            colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
+                        ) { Text("添加") }
+                    }
+                    if (d.whitelist.isEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            "还是空的 —— 开着白名单却一条都没加，等于所有聊天都不工作。",
+                            fontSize = 13.sp,
+                            color = palette.warn,
+                        )
+                    } else {
+                        Spacer(Modifier.height(6.dp))
+                        val whiteList = d.whitelist.sorted()
+                    if (whitePicking) {
+                        PickBar(
+                            count = whitePicked.size,
+                            total = whiteList.size,
+                            palette = palette,
+                            primaryLabel = "移出白名单",
+                            onPrimary = {
+                                val gone = whitePicked
+                                saveWhitelist(d.whitelistEnabled, d.whitelist - gone)
+                                whitelistNote = "已移出 ${gone.size} 个"
+                                whitePicked = emptySet()
+                                whitePicking = false
+                            },
+                            dangerLabel = "删除（不再出现）",
+                            onDanger = {
+                                val gone = whitePicked
+                                saveWhitelist(d.whitelistEnabled, d.whitelist - gone)
+                                store.ignoreChats(gone)
+                                ignoredCount = store.chatIgnored().size
+                                whitelistNote = "已删除 ${gone.size} 个，以后拉取不再出现"
+                                whitePicked = emptySet()
+                                whitePicking = false
+                            },
+                            onSelectAll = {
+                                whitePicked = if (whitePicked.size == whiteList.size) emptySet() else whiteList.toSet()
+                            },
+                            onCancel = {
+                                whitePicked = emptySet()
+                                whitePicking = false
+                            },
+                        )
+                        Spacer(Modifier.height(6.dp))
+                    }
+                    whiteList.forEach { name ->
+                        PickRow(
+                            label = conversationDisplayName(name),
+                            picking = whitePicking,
+                            selected = name in whitePicked,
+                            palette = palette,
+                            actionLabel = "移除",
+                            actionColor = palette.bad,
+                            onToggle = {
+                                whitePicked = if (name in whitePicked) whitePicked - name else whitePicked + name
+                            },
+                            onLongPress = {
+                                whitePicking = true
+                                whitePicked = whitePicked + name
+                            },
+                            onAction = {
+                                saveWhitelist(d.whitelistEnabled, d.whitelist - name)
+                                whitelistNote = "已移除「${conversationDisplayName(name)}」"
+                            },
+                        )
+                    }
+                    Text("长按任意一项可多选，然后一次移出 / 删除。", fontSize = 13.sp, color = palette.sub)
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    HintText(
+                        "名字要和微信里显示的一致（群聊填群名；改过备注的用改过的名字）；懒得敲字就用下面的「拉取会话列表」。",
+                        fontSize = 13.sp,
+                        color = palette.sub,
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+                Text("从微信里列出来", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = palette.text)
+                HintText(
+                    "点一下，然后回微信的首页或通讯录停两秒（滚一下能多收几个），再回来打开下面的「拉取到的联系人」去挑。\n" +
+                        "白名单开着的时候，你打开过的那个聊天也会自己进来（认的是聊天页顶上那个名字，也就是备注）。\n" +
+                        "⚠ 个人资料页不是来源 —— 那一页只有「微信号 / 地区」这种字段，读出来全是杂项，别在那里等。",
+                    fontSize = 13.sp,
+                    color = palette.sub,
+                )
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = {
+                            store.requestChats()
+                            whitelistNote = "已请求 · 回微信首页 / 通讯录停两秒，再回来这里看"
+                        },
+                        modifier = Modifier.height(44.dp),
+                        shape = RoundedCornerShape(RadiusR2),
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
+                    ) { Text("拉取会话列表") }
+                    Text(pullInfo, fontSize = 13.sp, color = palette.sub, modifier = Modifier.weight(1f))
+                }
+                val todo = cands.filter { it !in d.whitelist }
+                Spacer(Modifier.height(10.dp))
+                // 名单本身搬到二级页了：拉到几十个名字时铺在卡里会把整页撑得很长，也没法搜。
+                // 这里只留一个入口 + 数量。
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(RadiusR2))
+                        .background(palette.primary.copy(alpha = ChipBgAlpha))
+                        .clickable { onOpenCandidates() }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("拉取到的联系人（${cands.size}）", fontSize = 14.sp, color = palette.text)
+                        Text(
+                            when {
+                                cands.isEmpty() -> "还没收到候选 —— 点上面的按钮，然后去微信首页 / 通讯录停两秒"
+                                todo.isEmpty() -> "拉回来的都加进去了 · 点开可以搜、也可以移出"
+                                else -> "还没加进去的 ${todo.size} 个 · 点开可以搜索、批量加入"
+                            },
+                            fontSize = 13.sp,
+                            color = palette.sub,
+                        )
+                    }
+                    Text("查看 ›", fontSize = 13.sp, color = palette.primary)
+                }
+                if (ignoredCount > 0) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "已忽略 $ignoredCount 个（删掉的杂项）",
+                            fontSize = 13.sp,
+                            color = palette.sub,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            "恢复",
+                            fontSize = 13.sp,
+                            color = palette.primary,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(RadiusR1))
+                                .clickable {
+                                    store.clearIgnored()
+                                    ignoredCount = 0
+                                    whitelistNote = "已恢复：删掉的候选下次拉取会重新出现"
+                                }
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        )
+                    }
+                }
+                whitelistNote?.let {
+                    Spacer(Modifier.height(6.dp))
+                    Text(it, fontSize = 13.sp, color = palette.ok)
+                }
+            }
+        }
+        if (section == SettingsSection.ALL || section == SettingsSection.BACKUP) {
+            GlassCard(d.glassAlpha) {
+                Text("备份 / 迁移", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+                Text(
+                    "导入会合并同名角色，保留备份中没有的记录。",
+                    fontSize = 13.sp,
+                    color = palette.sub,
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("导出时包含 API Key", fontSize = 13.sp, color = palette.text)
+                        Text("开了的话导出文件里有明文 Key，别往公开地方放", fontSize = 13.sp, color = palette.sub)
+                    }
+                    Switch(checked = includeKey, onCheckedChange = { includeKey = it })
+                }
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = { exportLauncher.launch(Backup.FILE_NAME) },
+                        modifier = Modifier.weight(1f).height(48.dp),
+                        shape = RoundedCornerShape(RadiusR2),
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
+                    ) { Text("导出配置") }
+                    OutlinedButton(
+                        onClick = { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
+                        modifier = Modifier.weight(1f).height(48.dp),
+                        shape = RoundedCornerShape(RadiusR2),
+                    ) { Text("导入配置") }
+                }
+                backupNote?.let {
+                    Spacer(Modifier.height(6.dp))
+                    Text(it, fontSize = 13.sp, color = if (it.startsWith("已")) palette.ok else palette.bad)
+                }
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = { diagLauncher.launch("TalkTact-诊断包.zip") },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(RadiusR2),
+                ) { Text("导出诊断包（.zip）") }
+                Spacer(Modifier.height(4.dp))
+                HintText(
+                    "出问题时用它：环境 / 配置（不含 Key）/ 角色条数 / 抓到的界面结构 / 最近一次调用。\n" +
+                        "⚠️ 里面有你和对方的聊天内容，发出去之前先自己看一眼。",
+                    fontSize = 13.sp,
+                    color = palette.sub,
+                )
+                diagNote?.let {
+                    Spacer(Modifier.height(6.dp))
+                    Text(it, fontSize = 13.sp, color = if (it.startsWith("已")) palette.ok else palette.bad)
+                }
+            }
+        }
+        if (section == SettingsSection.ALL) {
+            GlassCard(d.glassAlpha) {
+                Text("诊断", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+                Text(
+                    "某个聊天页连按钮都不弹、或者「运行状态」报错的时候用这里：\n" +
+                        "让微信进程抓一次当前界面、看它真正发出去的那次调用，再复制出来发我。",
+                    fontSize = 13.sp,
+                    color = palette.sub,
+                )
+                Spacer(Modifier.height(8.dp))
                 Button(
-                    onClick = { exportLauncher.launch(Backup.FILE_NAME) },
-                    modifier = Modifier.weight(1f).height(48.dp),
+                    onClick = { leave(onOpenDiag) },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
                     shape = RoundedCornerShape(RadiusR2),
                     colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                ) { Text("导出配置") }
-                OutlinedButton(
-                    onClick = { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) },
-                    modifier = Modifier.weight(1f).height(48.dp),
-                    shape = RoundedCornerShape(RadiusR2),
-                ) { Text("导入配置") }
-            }
-            backupNote?.let {
-                Spacer(Modifier.height(6.dp))
-                Text(it, fontSize = 13.sp, color = if (it.startsWith("已")) palette.ok else palette.bad)
-            }
-            Spacer(Modifier.height(10.dp))
-            OutlinedButton(
-                onClick = { diagLauncher.launch("TalkTact-诊断包.zip") },
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = RoundedCornerShape(RadiusR2),
-            ) { Text("导出诊断包（.zip）") }
-            Spacer(Modifier.height(4.dp))
-            HintText(
-                "出问题时用它：环境 / 配置（不含 Key）/ 角色条数 / 抓到的界面结构 / 最近一次调用。\n" +
-                    "⚠️ 里面有你和对方的聊天内容，发出去之前先自己看一眼。",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            diagNote?.let {
-                Spacer(Modifier.height(6.dp))
-                Text(it, fontSize = 13.sp, color = if (it.startsWith("已")) palette.ok else palette.bad)
+                ) { Text("进入诊断") }
             }
         }
-
-        GlassCard(d.glassAlpha) {
-            Text("诊断", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            Text(
-                "某个聊天页连按钮都不弹、或者「运行状态」报错的时候用这里：\n" +
-                    "让微信进程抓一次当前界面、看它真正发出去的那次调用，再复制出来发我。",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = onOpenDiag,
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                shape = RoundedCornerShape(RadiusR2),
-                colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-            ) { Text("进入诊断") }
-        }
+    }
+    pendingExit?.let { action ->
+        AlertDialog(
+            onDismissRequest = { pendingExit = null },
+            title = { Text("有未保存的设置") },
+            text = { Text("保存后离开，或放弃这次修改。") },
+            confirmButton = { TextButton(onClick = { saveAll(); pendingExit = null; action() }) { Text("保存并离开") } },
+            dismissButton = { TextButton(onClick = { pendingExit = null; action() }) { Text("放弃修改") } },
+        )
     }
 }
 
@@ -2793,7 +1848,7 @@ fun ChatCandidatesScreen(
         items(hitTodo) { name ->
             Box(Modifier.padding(horizontal = 30.dp)) {
                 PickRow(
-                    label = name,
+                    label = conversationDisplayName(name),
                     picking = picking,
                     selected = name in picked,
                     palette = palette,
@@ -2808,7 +1863,7 @@ fun ChatCandidatesScreen(
                         saveWhitelist(d.whitelistEnabled, d.whitelist + name)
                         store.unignoreChats(setOf(name))
                         ignoredCount = store.chatIgnored().size
-                        note = "已加入「$name」"
+                        note = "已加入「${conversationDisplayName(name)}」"
                     },
                 )
             }
@@ -2826,7 +1881,7 @@ fun ChatCandidatesScreen(
             items(hitAdded) { name ->
                 Box(Modifier.padding(horizontal = 30.dp)) {
                     PickRow(
-                        label = name,
+                        label = conversationDisplayName(name),
                         picking = false,
                         selected = false,
                         palette = palette,
@@ -2836,7 +1891,7 @@ fun ChatCandidatesScreen(
                         onLongPress = {},
                         onAction = {
                             saveWhitelist(d.whitelistEnabled, d.whitelist - name)
-                            note = "已移出「$name」"
+                            note = "已移出「${conversationDisplayName(name)}」"
                         },
                     )
                 }
@@ -2991,7 +2046,7 @@ fun DiagScreen(store: ConfigStore, glassAlpha: Float, onBack: () -> Unit) {
         }
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 112.dp)) {
         ScreenHeader("诊断", "抓界面 · 看轨迹与调用 · 复制发我") {
             HeaderButton("↻ 刷新") { tick++ }
             Spacer(Modifier.width(8.dp))
@@ -3127,165 +2182,7 @@ private val RELATIONS = listOf("家人", "恋人", "暧昧", "朋友", "同学",
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun RolesScreen(store: ConfigStore, glassAlpha: Float, open: String?, onOpen: (String?) -> Unit) {
-    val palette = LocalPalette.current
-    var tick by remember { mutableStateOf(0) }
-    val roles = remember(tick) { store.roles() }
-    var pendingDelete by remember { mutableStateOf<String?>(null) }
-    val current = open?.let { k -> roles.firstOrNull { it.key == k } }
-
-    if (open != null && current != null) {
-        RoleDetail(
-            store = store,
-            role = current,
-            glassAlpha = glassAlpha,
-            onBack = {
-                onOpen(null)
-                tick++
-            },
-            onRename = { newName ->
-                store.renameRole(current.key, newName)
-                tick++
-            },
-            onChanged = { tick++ },
-        )
-        return
-    }
-
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
-        ScreenHeader("角色", "每个人一份档案，直接影响生成") {
-            HeaderButton("↻ 刷新") { tick++ }
-        }
-
-        GlassCard(glassAlpha) {
-            Text("这是干什么的", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            Text(
-                "模块会在你打开某个聊天页时，把读到的消息按联系人归档到这里（1 小时内重复的内容只留一条）。\n" +
-                    "点进某个人，写上「TA 是你什么人」和「平时的关系」—— 这些会连同之前攒下的聊天记录一起，\n" +
-                    "拼进提示词，直接影响「军师」生成出来的回复。\n" +
-                    "长按某一项可以直接删除它；点进去可以改名字，\n" +
-                        "也能「把另一个角色合并进来」—— 同一个人被记成两条时用那个。",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-        }
-
-        if (roles.isEmpty()) {
-            GlassCard(glassAlpha) {
-                Text("还没有记录", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-                Text(
-                    "去微信里打开几个聊天页，每个停两三秒，再回来点「刷新」。\n" +
-                        "（只在聊天页可见时读得到，所以记录是「你在场时看到的那几条」慢慢攒起来的。）",
-                    fontSize = 13.sp,
-                    color = palette.sub,
-                )
-            }
-        }
-
-        roles.forEach { role ->
-            val self = role.key == SELF_ROLE_KEY
-            GlassCard(
-                glassAlpha,
-                // 批 4c：卡片描边只表达「本人 = 绿」这一件事（原来「没写关系」也染一道紫，
-                // 紫色当成了「正常」用，跟状态语义打架）。关系没写靠下面那行琥珀文字说。
-                border = if (self) palette.okMark.copy(alpha = CardBorderAlpha) else null,
-            ) {
-                // 卡面差异化（设计师 P1）：「本人」不是「某个联系人」—— 它管的是我自己的说话风格，
-                // 是系统条目。给它一条**渐变竖条** + 一枚「系统」chip，一眼就和下面的联系人区分开。
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    if (self) {
-                        Box(
-                            Modifier
-                                .width(4.dp)
-                                .height(52.dp)
-                                .clip(RoundedCornerShape(2.dp))
-                                .background(Brush.verticalGradient(listOf(palette.primary, palette.okMark))),
-                        )
-                        Spacer(Modifier.width(12.dp))
-                    }
-                    Column(
-                        Modifier.weight(1f).combinedClickable(
-                            onClick = { onOpen(role.key) },
-                            // 「本人」不给删：它是常驻条目，删了也会立刻回来（见 Roles.withSelf）
-                            onLongClick = { if (!self) pendingDelete = role.key },
-                        ),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (self) {
-                                StatusDot(palette.okMark)
-                            }
-                            Text(
-                                role.name,
-                                fontSize = 16.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (self) palette.ok else palette.text,
-                                modifier = Modifier.padding(start = if (self) 6.dp else 0.dp).weight(1f, fill = false),
-                            )
-                            if (self) {
-                                Spacer(Modifier.width(8.dp))
-                                StatusChip("系统", palette.okMark)
-                            }
-                            if (role.renamed) {
-                                Text(
-                                    " ◦ 识别名 ${role.key.take(10)}",
-                                    fontSize = 10.sp,
-                                    color = palette.warn,
-                                    modifier = Modifier.weight(1f),
-                                )
-                            } else {
-                                Spacer(Modifier.weight(1f))
-                            }
-                            Text("${role.msgs.size} 条", fontSize = 13.sp, color = palette.sub)
-                        }
-                        Text(
-                            when {
-                                self && store.selfStyleEnabled() && store.selfSkill().isNotBlank() ->
-                                    "说话风格 skill：已开启 · ${formatTime(store.selfSkillAt())} 生成"
-                                self && store.selfStyleEnabled() -> "说话风格 skill：已开启（还没生成）"
-                                self -> "说话风格 skill：未开启（点进去打开）"
-                                role.relation.isBlank() -> "还没写 TA 是你什么人"
-                                else -> "${role.relation}${if (role.note.isBlank()) "" else " · ${role.note.take(18)}"}"
-                            },
-                            fontSize = 13.sp,
-                            color = when {
-                                self -> palette.ok
-                                role.relation.isBlank() -> palette.warn
-                                // 批 4c：紫色只表示「选中 / 主操作」，不承担「正常」—— 普通档案用次要文字色
-                                else -> palette.sub
-                            },
-                        )
-                        Text(
-                            "最近一条：${if (role.lastAt > 0) formatTime(role.lastAt) else "—"}",
-                            fontSize = 13.sp,
-                            color = palette.sub,
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    pendingDelete?.let { key ->
-        val shown = roles.firstOrNull { it.key == key }?.name ?: key
-        AlertDialog(
-            onDismissRequest = { pendingDelete = null },
-            title = { Text("删除角色「$shown」？") },
-            text = { Text("档案和记录一起删掉，无法恢复。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    store.removeRole(key)
-                    pendingDelete = null
-                    tick++
-                }) { Text("删除") }
-            },
-            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("取消") } },
-        )
-    }
-}
-
-
-@Composable
-private fun RoleDetail(
+internal fun RoleDetail(
     store: ConfigStore,
     role: Role,
     glassAlpha: Float,
@@ -3294,8 +2191,9 @@ private fun RoleDetail(
     onChanged: () -> Unit,
 ) {
     // 「本人」这条没有「TA 是你什么人」，它管的是另一件事（我的说话风格），单独一页
+    BackHandler(onBack = onBack)
     if (role.key == SELF_ROLE_KEY) {
-        SelfStyleDetail(store, glassAlpha)
+        SelfStyleDetail(store, glassAlpha, onBack)
         return
     }
     val palette = LocalPalette.current
@@ -3307,7 +2205,7 @@ private fun RoleDetail(
     val dirty = (relation to note) != persisted
     var confirm by remember { mutableStateOf<String?>(null) }
     var renameOpen by remember { mutableStateOf(false) }
-    var draft by remember(role.key) { mutableStateOf(role.name) }
+    var draft by remember(role.key) { mutableStateOf(conversationDisplayName(role.name)) }
     // 合并：先选「把谁并进来」，再确认一次（被并掉的那个角色会消失，不可撤销）
     var mergeOpen by remember { mutableStateOf(false) }
     var pendingMerge by remember { mutableStateOf<Role?>(null) }
@@ -3319,18 +2217,18 @@ private fun RoleDetail(
         store.roles().filterNot { it.key == role.key || it.key == SELF_ROLE_KEY }
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
-        ScreenHeader(role.name, "档案 · ${role.msgs.size} 条记录") {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 112.dp)) {
+        ScreenHeader(conversationDisplayName(role.name), "档案 · ${role.msgs.size} 条记录") {
             TextButton(onClick = { renameOpen = true }) { Text("改名字") }
             Spacer(Modifier.width(8.dp))
             HeaderButton("← 返回", onBack)
         }
 
         GlassCard(glassAlpha) {
-            Text("TA 是你什么人", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+            Text("关系", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
             if (role.renamed) {
                 Text(
-                    "（识别到的会话名是「${role.key}」，它负责匹配、不会被改动，所以改了名字以后消息还是记到这一条）",
+                    "（识别到的会话名是「${conversationDisplayName(role.key)}」，它负责匹配、不会被改动，所以改了名字以后消息还是记到这一条）",
                     fontSize = 13.sp,
                     color = palette.sub,
                 )
@@ -3352,7 +2250,7 @@ private fun RoleDetail(
                 value = note,
                 onValueChange = { note = it },
                 modifier = Modifier.fillMaxWidth().heightIn(min = 110.dp),
-                label = { Text("平时的关系（越具体越有用）") },
+                label = { Text("补充背景") },
             )
             Spacer(Modifier.height(6.dp))
             Text(
@@ -3362,7 +2260,7 @@ private fun RoleDetail(
             )
             Spacer(Modifier.height(10.dp))
             if (dirty) {
-                Text("未保存，你所做出的改动不会被保存", fontSize = 13.sp, color = palette.bad)
+                Text("有未保存的修改", fontSize = 13.sp, color = palette.bad)
                 Spacer(Modifier.height(6.dp))
             }
             Button(
@@ -3379,7 +2277,7 @@ private fun RoleDetail(
         }
 
         GlassCard(glassAlpha) {
-            Text("记下来的聊天（${role.msgs.size} 条）", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+            Text("聊天记录 · ${role.msgs.size} 条", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
             Text(
                 "时间是我「看到」它的时间，不是微信里那条消息的真实时间 —— 微信不给这条信息，" +
                     "而模块只在聊天页可见时读得到。生成回复时会带上最近 20 条（屏幕上已有的不再重复）。",
@@ -3470,7 +2368,7 @@ private fun RoleDetail(
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "这里只改显示。识别到的会话名「${role.key}」不变 —— 所以改完名字，" +
+                        "这里只改显示。识别到的会话名「${conversationDisplayName(role.key)}」不变 —— 所以改完名字，" +
                             "以后这个会话的消息还是记到同一条上，不会分家。",
                         fontSize = 13.sp,
                         color = palette.sub,
@@ -3494,7 +2392,7 @@ private fun RoleDetail(
             text = {
                 Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
                     Text(
-                        "合并后：两边记录按时间排好留在「${role.name}」，被并的那个角色会消失。",
+                        "合并后：两边记录按时间排好留在「${conversationDisplayName(role.name)}」，被并的那个角色会消失。",
                         fontSize = 13.sp,
                         color = palette.sub,
                     )
@@ -3511,7 +2409,7 @@ private fun RoleDetail(
                                 }
                                 .padding(horizontal = 12.dp, vertical = 10.dp),
                         ) {
-                            Text(o.name, fontSize = 14.sp, color = palette.text)
+                            Text(conversationDisplayName(o.name), fontSize = 14.sp, color = palette.text)
                             Text(
                                 "${o.msgs.size} 条记录" +
                                     if (o.relation.isNotBlank()) " · ${o.relation}" else "",
@@ -3529,11 +2427,11 @@ private fun RoleDetail(
     pendingMerge?.let { src ->
         AlertDialog(
             onDismissRequest = { pendingMerge = null },
-            title = { Text("把「${src.name}」合并进来？") },
+            title = { Text("把「${conversationDisplayName(src.name)}」合并进来？") },
             text = {
                 Text(
-                    "「${src.name}」的 ${src.msgs.size} 条记录会并进「${role.name}」，按时间重新排好；" +
-                        "合并完「${src.name}」这个角色就没了，无法撤销。\n\n" +
+                    "「${conversationDisplayName(src.name)}」的 ${src.msgs.size} 条记录会并进「${conversationDisplayName(role.name)}」，按时间重新排好；" +
+                        "合并完「${conversationDisplayName(src.name)}」这个角色就没了，无法撤销。\n\n" +
                         if (role.relation.isBlank() && (src.relation.isNotBlank() || src.note.isNotBlank())) {
                             "这边的「TA 是你什么人 / 平时的关系」还空着，会用它的补上。"
                         } else {
@@ -3546,7 +2444,7 @@ private fun RoleDetail(
                     store.mergeRoles(src.key, role.key)
                     pendingMerge = null
                     listTick++
-                    mergedNote = "已把「${src.name}」并进来"
+                    mergedNote = "已把「${conversationDisplayName(src.name)}」并进来"
                     onChanged()
                 }) { Text("合并") }
             },
@@ -3584,7 +2482,7 @@ private fun RoleDetail(
  * 现在的状态 + 手动生成。因为这条线的产出不是"关系描述"，而是一份**说话风格档案**。
  */
 @Composable
-private fun SelfStyleDetail(store: ConfigStore, glassAlpha: Float) {
+private fun SelfStyleDetail(store: ConfigStore, glassAlpha: Float, onBack: () -> Unit) {
     val palette = LocalPalette.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -3597,30 +2495,15 @@ private fun SelfStyleDetail(store: ConfigStore, glassAlpha: Float) {
     val skill = remember(tick) { store.selfSkill() }
     val skillAt = remember(tick) { store.selfSkillAt() }
 
-    LazyColumn(Modifier.fillMaxSize()) {
-        item { ScreenHeader("本人", "我的说话风格") }
-
-        item {
-            GlassCard(glassAlpha) {
-                Text("这是干什么的", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-                Text(
-                    "把「你自己发出去的话」攒起来，每天在你设定的时间交给模型提炼成一份说话风格档案。\n" +
-                        "「军师」生成候选回复时会参考它 —— 回复就会更像你平时说话的样子。\n\n" +
-                        "关掉之后：不再采集、不再生成，也不再使用（已经生成的那份留着，重新打开立刻可用）；\n" +
-                        "已经攒下的原始记录会被清掉。\n" +
-                        "样本只在你打开聊天页时才读得到，所以是「你在场时看到的那几句」慢慢攒起来的。",
-                    fontSize = 13.sp,
-                    color = palette.sub,
-                )
-            }
-        }
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 112.dp)) {
+        item { ScreenHeader("我的说话风格", "") { HeaderButton("← 返回", onBack) } }
 
         item {
             GlassCard(glassAlpha, border = if (on) palette.okMark.copy(alpha = CardBorderAlpha) else null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(
-                            "把我的说话风格做成 skill",
+                            "使用我的说话风格",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Medium,
                             color = palette.text,
@@ -3640,23 +2523,19 @@ private fun SelfStyleDetail(store: ConfigStore, glassAlpha: Float) {
                         tick++
                     }
                 }
+                Text("关闭时停止采集和使用，并清空原始样本；已生成档案保留。", fontSize = 12.sp, color = palette.sub)
             }
         }
 
         item {
             GlassCard(glassAlpha) {
                 Text(
-                    "每天什么时候生成",
+                    "自动提炼时间",
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Medium,
                     color = palette.text,
                 )
-                Text(
-                    "现在是 ${"$hour".padStart(2, '0')}:00 —— 0 点到 23 点里挑都行。" +
-                        if (on) "改完立刻生效（按新的时间重新排）。" else "打开上面的开关后按这个时间跑。",
-                    fontSize = 13.sp,
-                    color = palette.sub,
-                )
+                Text("每天 ${"$hour".padStart(2, '0')}:00", fontSize = 13.sp, color = palette.sub)
                 Slider(
                     value = hour.toFloat(),
                     onValueChange = {
@@ -3689,7 +2568,7 @@ private fun SelfStyleDetail(store: ConfigStore, glassAlpha: Float) {
                     )
                 } else {
                     Text(
-                        "当前 skill（生成回复时会带上）",
+                        "当前风格档案",
                         fontSize = 13.sp,
                         color = palette.sub,
                         modifier = Modifier.padding(top = 10.dp),

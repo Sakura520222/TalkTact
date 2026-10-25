@@ -4,9 +4,10 @@
 [shibry88-netizen/TalkTact](https://github.com/shibry88-netizen/TalkTact) 独立维护。
 保留原作者归属与 GPL-3.0；仅按需筛选上游有价值的提交，不自动同步或向上游提交 PR。
 
-首个独立二改测试版本为 **0.8.12-fork.1**（versionCode 40，基于上游 0.8.12），
-分发入口为 [本 fork 的预发布 Release](https://github.com/Sakura520222/TalkTact/releases/tag/v0.8.12-fork.1)。
-微信 hook、实际玻璃效果和 OCR 尚未真机复验，不能用 JVM 截图或上游历史验证代替。
+首个正式版本为 **0.9.0**（versionCode 41，基于上游 0.8.12），
+分发入口为 [本 fork Release](https://github.com/Sakura520222/TalkTact/releases/tag/v0.9.0)。
+早期 `0.8.12-fork.1` 测试版保留为历史发行物，不包含后续的页面、QQ 接入与玻璃浮窗重写。
+实机进展与已知问题见 [README](../README.md#兼容与进展)，安装与迁移步骤见 [开始使用](QUICKSTART.md)。
 
 ## 应用身份
 
@@ -20,11 +21,11 @@
 
 1. 打开仓库根目录；SDK 路径写入被 Git 忽略的 `local.properties`。
 2. 在 **Settings → Build, Execution, Deployment → Build Tools → Gradle** 中使用项目的 **Gradle Wrapper**，版本固定为 **9.3.1**。
-3. 将 **Gradle JDK** 设置为 **JDK 17**。IDE 自带的 JBR 可用于运行 IDE，无需改为项目 JDK。
+3. 将 **Gradle JDK** 设置为 **JDK 21**。IDE 自带的 JBR 可用于运行 IDE，无需改为项目 JDK。
 4. SDK 平台与 CI 一致：`platforms;android-37.0`、`build-tools;36.0.0`。
 5. Sync Project with Gradle Files。运行配置选择 `app`，构建变体默认 `debug`。
 
-`gradle/gradle-daemon-jvm.properties` 要求构建进程使用已安装的 JDK 17；无需改变其它项目使用的系统 Java。
+`gradle/gradle-daemon-jvm.properties` 要求构建进程使用已安装的 JDK 21；无需改变其它项目使用的系统 Java。
 PowerShell 验证命令：
 
 ```powershell
@@ -35,10 +36,10 @@ $env:ANDROID_HOME = '<本机 Android SDK 目录>'
 python .github/scripts/verify_apk.py app/build/outputs/apk/release/app-release.apk --expected-cert signing/certificate.sha256
 ```
 
-构建工具固定为 **AGP 9.1.1 / Gradle 9.3.1 / 内置 Kotlin 与 Compose 插件 2.2.10 / JDK 17**。
+构建工具固定为 **AGP 9.1.1 / Gradle 9.3.1 / Kotlin 与 Compose 插件 2.4.20 / JDK 21**。
 SDK 37.0 的新格式需要 AGP 9.1.1；原来的 AGP 8.12.0 会报找不到 `android-37`，
 不能通过忽略警告或降低 compileSdk 修复。依据见 [官方兼容表](https://developer.android.com/build/releases/agp-9-1-0-release-notes)。
-AGP 内置 Kotlin，JVM target 跟随 Java 的 17；不再重复应用 `org.jetbrains.kotlin.android`。
+Miuix 0.9.4 需要 Kotlin 2.4 metadata 与 JDK 21 的测试运行时，因此当前显式使用 KGP，并保留 `android.builtInKotlin=false`；Java / Kotlin 字节码目标均为 17。
 Linux / macOS 使用 `./gradlew`。不需要全局安装 Gradle；Wrapper 校验下载包的 SHA-256。
 JVM 单测不需要手机，但 Android Gradle 构建和 Robolectric 仍需要 Android SDK 与首次下载依赖。
 真机 hook、微信 View 适配、玻璃效果和 OCR 必须另外验证。
@@ -103,3 +104,14 @@ KEYSTORE_ALIAS=talktact-fork
 更新前检查工作区，在确认过的本地 `main` 基线上建 `feature/…` 或 `fix/…` 分支。
 先 fetch 和审查上游差异，再挑选必要提交；保留二改配置、签名和发布目标，完成回归后再合入自己的 `main`。
 不要用自动 merge、强制 reset 或上游发布工作流覆盖二改。
+
+## 调试浮窗验证
+
+仅 debug 构建包含固定合成场景，无真实聊天、模型请求或自动发送。
+
+```powershell
+adb shell am start -W --activity-clear-top -n io.github.shibry88_netizen.talktact/dev.goutou.wingman.OverlayPreviewActivity
+adb shell run-as io.github.shibry88_netizen.talktact cat files/overlay-preview.json
+```
+
+计数用于验证空白处不穿透、子按钮 / 长按可用、卡片外可点击；背景就绪字段只证明 GPU 引用成功。此预览不能代替微信 / QQ hook、真实 View 结构和 OCR 的实机验收。QQ 需在设置启用并获框架作用域；新包安装后需重启宿主加载新入口。
