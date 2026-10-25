@@ -713,7 +713,7 @@ fun TrialScreen(store: ConfigStore, glassAlpha: Float) {
     val clipboard = LocalClipboardManager.current
     val hits = remember(input) { Sensitive.hits(input) }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
         ScreenHeader("试一试", "粘贴聊天 · 预览回复 · 验证接口")
         GlassCard(glassAlpha) {
             OutlinedTextField(
@@ -927,7 +927,7 @@ fun MentorScreen(store: ConfigStore, glassAlpha: Float, onSaved: () -> Unit) {
         onSaved()
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
         ScreenHeader("军师", "提示词 · skill")
         GlassCard(glassAlpha) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1189,136 +1189,18 @@ fun MentorScreen(store: ConfigStore, glassAlpha: Float, onSaved: () -> Unit) {
 fun SettingsScreen(
     store: ConfigStore,
     ui: ConfigData,
-    onUi: (ConfigData) -> Unit,
     onOpenAdvanced: () -> Unit,
 ) {
     val palette = LocalPalette.current
     val context = LocalContext.current
-    var d by remember { mutableStateOf(ui) }
-    // 见「高级设置」里同名的那段：拿草稿和上次落盘的那份比，才知道有没有没保存的改动
-    var persisted by remember { mutableStateOf(ui) }
-    val dirty = d != persisted
+    val d = ui
 
-    fun update(next: ConfigData) {
-        d = next
-        onUi(next)
-    }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
+        ScreenHeader("设置", "高级设置 · 关于")
 
-    fun saveAppearance() {
-        store.save(d)
-        d = store.load()
-        persisted = d
-        onUi(d)
-    }
-
-    val pickImage = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            } catch (t: Throwable) {
-                // 有的来源不支持持久化授权，那就只在本次运行里有效
-            }
-            update(d.copy(bgUri = uri.toString()))
-        }
-    }
-
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
-        ScreenHeader("设置", "外观 · 高级设置 · 关于")
-
-        GlassCard(d.glassAlpha) {
-            Text("外观", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            Spacer(Modifier.height(6.dp))
-            Text("玻璃不透明度：${(d.glassAlpha * 100).toInt()}%", fontSize = 13.sp, color = palette.sub)
-            Slider(value = d.glassAlpha, onValueChange = { update(d.copy(glassAlpha = it)) }, valueRange = 0.3f..1f)
-            Spacer(Modifier.height(4.dp))
-            HintText(
-                "玻璃背景模糊：${d.glassBlur.toInt()}dp（面板背后做一次真实模糊；内置渐变背景没有细节可模糊，会自动跳过）",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Slider(value = d.glassBlur, onValueChange = { update(d.copy(glassBlur = it)) }, valueRange = 0f..40f)
-            Spacer(Modifier.height(4.dp))
-            // 设备分级：把「自动」实际判成了哪一档直接写出来，省得猜为什么效果不一样
-            val lowRamDevice = remember { isLowRamDevice(context) }
-            val effectiveQuality = decideGlassQuality(d.glassQuality, lowRamDevice, Build.VERSION.SDK_INT)
-            Text(
-                "玻璃效果：${glassQualityLabel(effectiveQuality)}" +
-                    if (d.glassQuality == GLASS_QUALITY_AUTO) "　（自动判定）" else "　（手动选的）",
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                GlassPill("自动", d.glassQuality == GLASS_QUALITY_AUTO, Modifier.weight(1f)) {
-                    update(d.copy(glassQuality = GLASS_QUALITY_AUTO))
-                }
-                GlassPill("高（全开）", d.glassQuality == GLASS_QUALITY_HIGH, Modifier.weight(1f)) {
-                    update(d.copy(glassQuality = GLASS_QUALITY_HIGH))
-                }
-                GlassPill("低（省电）", d.glassQuality == GLASS_QUALITY_LOW, Modifier.weight(1f)) {
-                    update(d.copy(glassQuality = GLASS_QUALITY_LOW))
-                }
-            }
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(
-                    onClick = { pickImage.launch(arrayOf("image/*")) },
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(RadiusR2),
-                ) { Text("选择背景图") }
-                OutlinedButton(
-                    onClick = { update(d.copy(bgUri = "")) },
-                    enabled = d.bgUri.isNotBlank(),
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(RadiusR2),
-                ) { Text("恢复默认背景") }
-            }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                if (d.bgUri.isNotBlank()) {
-                    "已设置自定义背景：玻璃面板背后会对它做真实的背景模糊 + 折射。"
-                } else {
-                    "当前用的是内置渐变背景（跟随系统明暗自动切换，不是图片）；" +
-                        "选一张自己的图就会替换掉它，点「恢复默认背景」可以换回来。"
-                },
-                fontSize = 13.sp,
-                color = palette.sub,
-            )
-            // 压暗只对自定义背景图开放：内置渐变本身已经调过明度，
-            // 再压一层会把配色一起糊掉，所以没选图时这个滑杆根本不出现。
-            if (d.bgUri.isNotBlank()) {
-                Spacer(Modifier.height(4.dp))
-                Text("背景压暗：${(d.bgDim * 100).toInt()}%", fontSize = 13.sp, color = palette.sub)
-                Slider(value = d.bgDim, onValueChange = { update(d.copy(bgDim = it)) }, valueRange = 0f..0.8f)
-            }
-            Spacer(Modifier.height(14.dp))
-            // 外观现在自己带一个保存按钮：接口那套已经搬进「高级设置」，别再共用一个「保存」了。
-            // 滑杆是即时预览的，但**不点这个按钮就不会落盘** —— 红字挨着它。
-            if (dirty) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "未保存，你所做出的改动不会被保存",
-                        modifier = Modifier.weight(1f),
-                        fontSize = 13.sp,
-                        color = palette.bad,
-                    )
-                    Spacer(Modifier.width(10.dp))
-                    Button(
-                        onClick = { saveAppearance() },
-                        modifier = Modifier.height(46.dp),
-                        shape = RoundedCornerShape(RadiusR2),
-                        colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                    ) { Text("保存外观") }
-                }
-            } else {
-                Button(
-                    onClick = { saveAppearance() },
-                    modifier = Modifier.fillMaxWidth().height(50.dp),
-                    shape = RoundedCornerShape(RadiusR2),
-                    colors = ButtonDefaults.buttonColors(containerColor = palette.primary),
-                ) { Text("已保存") }
-            }
-        }
-
+        // 外观卡（玻璃强度 / 模糊 / 背景图 / 档位）已随 2026-10 设计重做删除：
+        // 新设计是莫奈取色 + 扁平 squircle 卡，旧玻璃参数不再有 UI 入口。
+        // （Config key 与已保存的值保留 —— 老用户设过的背景图仍生效，导入导出不受影响。）
         GlassCard(d.glassAlpha) {
             Text("高级设置", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
             // 三行「现在是什么样」：入口卡原来只有一句名词罗列（接口地址 / 分析 / 备份 / 诊断），
@@ -1638,7 +1520,7 @@ fun AdvancedScreen(
         }
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
         ScreenHeader("高级设置", "接口 · 分析 · 备份 · 诊断") {
             HeaderButton("← 返回", onBack)
         }
@@ -2991,7 +2873,7 @@ fun DiagScreen(store: ConfigStore, glassAlpha: Float, onBack: () -> Unit) {
         }
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
         ScreenHeader("诊断", "抓界面 · 看轨迹与调用 · 复制发我") {
             HeaderButton("↻ 刷新") { tick++ }
             Spacer(Modifier.width(8.dp))
@@ -3152,7 +3034,7 @@ fun RolesScreen(store: ConfigStore, glassAlpha: Float, open: String?, onOpen: (S
         return
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
         ScreenHeader("角色", "每个人一份档案，直接影响生成") {
             HeaderButton("↻ 刷新") { tick++ }
         }
@@ -3319,7 +3201,7 @@ private fun RoleDetail(
         store.roles().filterNot { it.key == role.key || it.key == SELF_ROLE_KEY }
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 120.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 12.dp)) {
         ScreenHeader(role.name, "档案 · ${role.msgs.size} 条记录") {
             TextButton(onClick = { renameOpen = true }) { Text("改名字") }
             Spacer(Modifier.width(8.dp))

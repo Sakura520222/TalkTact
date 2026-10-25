@@ -102,6 +102,12 @@ import dev.goutou.wingman.ModuleStatus
 import dev.goutou.wingman.config.ConfigData
 import dev.goutou.wingman.config.RemoteSync
 import dev.goutou.wingman.config.ConfigStore
+import top.yukonga.miuix.kmp.squircle.LocalSquircleEnabled
+import top.yukonga.miuix.kmp.squircle.squircleBackground
+import top.yukonga.miuix.kmp.theme.ColorSchemeMode
+import top.yukonga.miuix.kmp.theme.Colors
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.theme.ThemeController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -223,6 +229,11 @@ data class Palette(
     val bgLineAlpha: Float,
     val glass: Color,
     /**
+     * 设计重做（2026-10）：扁平 squircle 卡的**实底色**（浅 #FFFFFF / 深 #2A2D33）——
+     * HyperOS 的卡片不是玻璃，是纯色超椭圆 + 极淡投影。旧玻璃字段保留只为兼容字段引用。
+     */
+    val cardBg: Color,
+    /**
      * 玻璃面板的**染色**用色：两种明暗都是白。
      *
      * 低 alpha 的白才是「玻璃反光」；而 [glass] 是给 Material surface 用的**实色**
@@ -265,102 +276,116 @@ data class Palette(
     val dark: Boolean,
 )
 
+/**
+ * Miuix / HyperOS 风格的浅色板（界面二改第一批）。
+ *
+ * 颜色对齐 Miuix 默认配色（compose-miuix-ui 文档「颜色系统」页）：
+ * primary `#3482FF`、次级文字 `#8C93B0`、背景纯白系。语义色用 HyperOS 官方四色
+ * （蓝 3482FF / 绿 00B578 / 橙 FF8F1F / 红 FA5151），文字档再压深一档保 AA 对比度
+ * （沿用旧紫板的「文字 / 图形两档」结构，见 [Palette.okMark]）。
+ *
+ * 背景刻意**不是纯平白**：纯白底 + 白玻璃填充 = 白板（第 6 版玻璃的教训），
+ * 给极淡的蓝灰渐变 + 极低的蓝光晕 —— 玻璃的折射 / 描边才有东西可立。
+ */
 private val LightPalette = Palette(
-    primary = Color(0xFF7C3AED),
-    soft = Color(0xFFEDE7FA),
-    text = Color(0xFF17161D),
-    sub = Color(0xFF6B6878),
-    // 文字档：比原来深一档（原来是 #1FA463 / #D9910A / #D64545，浅紫底上只有 2~3:1）
-    ok = Color(0xFF0E6E43),
-    warn = Color(0xFF7A4F00),
-    bad = Color(0xFFB32828),
-    okMark = Color(0xFF178A52),
+    primary = Color(0xFF3482FF),
+    soft = Color(0xFFEAF2FF),
+    text = Color(0xFF0B0B0F),
+    sub = Color(0xFF8C93B0),
+    // 文字档：HyperOS 语义色压深一档，浅底上才够 4.5:1
+    ok = Color(0xFF00714A),
+    warn = Color(0xFF8A5A00),
+    bad = Color(0xFFC93A2E),
+    okMark = Color(0xFF00A163),
     warnMark = Color(0xFFB07400),
-    badMark = Color(0xFFC93B3B),
-    // 背景整体加深加饱和：玻璃是「后面有起伏」才成立的，近白的底 + 白填充 = 一块白板
-    bgTop = Color(0xFFF2ECFC),
-    bgMid = Color(0xFFE2D7F7),
-    bgBottom = Color(0xFFD6C7F0),
-    bgGlow = Color(0xFF8B5CF6),
-    bgGlowAlpha = 0.20f,
-    bgVignette = Color(0xFF7C5AC0),
-    bgVignetteAlpha = 0.06f,
+    badMark = Color(0xFFE94634),
+    // 背景：Miuix 式近纯色（极淡冷灰渐变，不再是紫玻璃时代的「起伏救场」背景）
+    bgTop = Color(0xFFFAFBFD),
+    bgMid = Color(0xFFF3F5F9),
+    bgBottom = Color(0xFFEDF0F5),
+    bgGlow = Color(0xFF3482FF),
+    bgGlowAlpha = 0.07f,
+    bgVignette = Color(0xFF3482FF),
+    bgVignetteAlpha = 0.03f,
     bgGrain = Color(0xFFFFFFFF),
-    bgGrainAlpha = 0.050f,
-    bgLine = Color(0xFF8B5CF6),
-    bgLineAlpha = 0.035f,
+    bgGrainAlpha = 0.040f,
+    bgLine = Color(0xFF3482FF),
+    bgLineAlpha = 0.025f,
     glass = Color(0xFFFFFFFF),
+    cardBg = Color(0xFFFFFFFF),
     glassTint = Color(0xFFFFFFFF),
     glassBorder = Color(0xB3FFFFFF),
-    // L1：紫晶玻璃（**比背景更暗更紫**）。数值按实测背景校准：
-    //   #C7B6F6 @0.50 铺在 (229,220,248) 上 = (214,201,247) → 比背景暗 5.0%、B−R 由 +19 升到 +33
-    //   #B7A1E6 @0.50 铺在 (211,195,238) 上 = (197,178,234) → 暗 5.4%、更紫；卡内自上而下约 8% 明暗过渡
-    glassFillTop = Color(0xFFC7B6F6),
-    glassFillBottom = Color(0xFFB7A1E6),
-    // 基准值按「默认玻璃强度（0.92）时正好落到设计师给的 0.50」标定 —— 见 fillAlpha()
-    glassFillTopAlpha = 0.40f,
-    glassFillBottomAlpha = 0.40f,
+    // L1：白玻璃（上白下淡蓝）。Miuix 底下背景近白，玻璃靠「白上更白 + 淡蓝底衬」立厚度
+    glassFillTop = Color(0xFFFFFFFF),
+    glassFillBottom = Color(0xFFDCEBFD),
+    glassFillTopAlpha = 0.42f,
+    glassFillBottomAlpha = 0.34f,
     glassEdgeHi = Color(0xFFFFFFFF),
-    glassEdgeHiAlpha = 0.60f,
-    glassEdgeMidAlpha = 0.16f,
-    // 右下折射暗边：新填充变暗后，旧紫边比卡面还亮（会翻成「亮边」），所以压暗半档
-    glassEdgeLow = Color(0xFFA98FE0),
-    glassEdgeLowAlpha = 0.32f,
-    glassTopEdgeAlpha = 0.60f,
+    glassEdgeHiAlpha = 0.65f,
+    glassEdgeMidAlpha = 0.18f,
+    // 右下折射暗边：淡蓝（白→白读不出厚度）
+    glassEdgeLow = Color(0xFF9EC5F2),
+    glassEdgeLowAlpha = 0.34f,
+    glassTopEdgeAlpha = 0.65f,
     glassTopEdgeDp = 1.5f,
-    glassBottomEdge = Color(0xFF8E6FD6),
-    glassBottomEdgeAlpha = 0.18f,
-    glassSweepAlpha = 0.10f,
-    glassShadow = Color(0xFF4C2C8C),
-    glassShadowAlpha = 0.14f,
+    glassBottomEdge = Color(0xFF5B8FD6),
+    glassBottomEdgeAlpha = 0.16f,
+    glassSweepAlpha = 0.09f,
+    glassShadow = Color(0xFF2E4E7E),
+    glassShadowAlpha = 0.10f,
     glassShadowDp = 18f,
     fieldFill = Color(0x8CFFFFFF),
-    fieldBorder = Color(0x47A58BD8),
+    fieldBorder = Color(0x478FBFF5),
     dark = false,
 )
 
+/**
+ * Miuix / HyperOS 风格的深色板：背景 `#242424` 系（带蓝灰起伏），primary `#277AF7`。
+ * 玻璃结构与旧深紫板一致，填充 / 暗边换蓝调（带蓝的白才是「有色玻璃」，纯白在深底上发灰）。
+ */
 private val DarkPalette = Palette(
-    primary = Color(0xFFB79CFF),
-    soft = Color(0xFF322A4D),
-    text = Color(0xFFF2EFFA),
-    sub = Color(0xFFA9A4BA),
-    // 深色下三支颜色两档都用同一支（实测对比度 4.6~5.8:1，都够）
+    primary = Color(0xFF277AF7),
+    soft = Color(0xFF2B3B54),
+    text = Color(0xFFF2F2F2),
+    sub = Color(0xFF787E96),
+    // 深色下三支颜色两档都用同一支（沿用旧板做法，对比度足够）
     ok = Color(0xFF4FD296),
     warn = Color(0xFFF0B95B),
     bad = Color(0xFFFF8A8A),
     okMark = Color(0xFF4FD296),
     warnMark = Color(0xFFF0B95B),
     badMark = Color(0xFFFF8A8A),
-    bgTop = Color(0xFF221439),
-    bgMid = Color(0xFF2B1B4D),
-    bgBottom = Color(0xFF1B1230),
-    bgGlow = Color(0xFF7C3AED),
-    bgGlowAlpha = 0.22f,
+    bgTop = Color(0xFF1B1D21),
+    bgMid = Color(0xFF16181C),
+    bgBottom = Color(0xFF111316),
+    bgGlow = Color(0xFF277AF7),
+    bgGlowAlpha = 0.10f,
     bgVignette = Color(0xFF000000),
-    bgVignetteAlpha = 0.28f,
+    bgVignetteAlpha = 0.30f,
     bgGrain = Color(0xFFFFFFFF),
-    bgGrainAlpha = 0.022f,
+    bgGrainAlpha = 0.020f,
     bgLine = Color(0xFFFFFFFF),
-    bgLineAlpha = 0.028f,
-    glass = Color(0xFF2A2734),
+    bgLineAlpha = 0.022f,
+    glass = Color(0xFF242424),
+    cardBg = Color(0xFF2A2D33),
     glassTint = Color(0xFFFFFFFF),
     glassBorder = Color(0x33FFFFFF),
-    // 深色：上白下「带紫的白」—— 白 0.16 在深紫底上发灰，带紫才是有色玻璃
-    glassFillTop = Color(0xFFFFFFFF),
-    glassFillBottom = Color(0xFFB79CF0),
-    glassFillTopAlpha = 0.13f,
-    glassFillBottomAlpha = 0.06f,
+    // 深色：上「带蓝的白」下淡蓝 —— 深底上白 0.12 会发灰，带蓝才是有色玻璃
+    glassFillTop = Color(0xFFEAF2FF),
+    glassFillBottom = Color(0xFF6FA5F5),
+    glassFillTopAlpha = 0.12f,
+    glassFillBottomAlpha = 0.05f,
     glassEdgeHi = Color(0xFFFFFFFF),
     glassEdgeHiAlpha = 0.55f,
     glassEdgeMidAlpha = 0.10f,
-    glassEdgeLow = Color(0xFFC9B4FF),
-    glassEdgeLowAlpha = 0.26f,
+    glassEdgeLow = Color(0xFF8FBFF5),
+    glassEdgeLowAlpha = 0.24f,
     glassTopEdgeAlpha = 0.55f,
     glassTopEdgeDp = 1.5f,
     glassBottomEdge = Color(0xFF000000),
     glassBottomEdgeAlpha = 0.22f,
-    glassSweepAlpha = 0.085f,
-    glassShadow = Color(0xFF0B0616),
+    glassSweepAlpha = 0.075f,
+    glassShadow = Color(0xFF060809),
     glassShadowAlpha = 0.45f,
     glassShadowDp = 24f,
     fieldFill = Color(0x14FFFFFF),
@@ -532,19 +557,102 @@ private class AgslGlass {
  * [dark] 留空 = 跟随系统（正式路径）；显式传值只有两个用途：截图回归要深色 / 浅色各出一张，
  * 以及 Compose Preview 想钉住某一套配色 —— 都比改 Robolectric 限定符干净。
  */
+/**
+ * 从 Miuix 的 Monet 色板（取自壁纸）派生整套 [Palette]。
+ *
+ * 分工遵循 HyperOS 惯例：**Monet 只染强调色与容器**（primary / tertiaryContainer /
+ * surfaceContainer 系的背景与卡片），**文字与语义色保持中性** —— 正文永远近黑/近白，
+ * 红 / 绿 / 琥珀语义不随壁纸跑（不然状态色被洗掉，「正常」会看不出）。
+ * 玻璃参数（液态玻璃底栏用的 tint / 顶边光）保持中性白。
+ */
+private fun monetPalette(mc: Colors, dark: Boolean): Palette = Palette(
+    primary = mc.primary,
+    soft = mc.tertiaryContainer,
+    text = if (dark) Color(0xFFF2F2F2) else Color(0xFF0B0B0F),
+    sub = if (dark) Color(0xFF787E96) else Color(0xFF8C93B0),
+    // 语义色（HyperOS 四色的文字 / 图形两档），不参与 Monet
+    ok = if (dark) Color(0xFF4FD296) else Color(0xFF00714A),
+    warn = if (dark) Color(0xFFF0B95B) else Color(0xFF8A5A00),
+    bad = if (dark) Color(0xFFFF8A8A) else Color(0xFFC93A2E),
+    okMark = if (dark) Color(0xFF4FD296) else Color(0xFF00A163),
+    warnMark = if (dark) Color(0xFFF0B95B) else Color(0xFFB07400),
+    badMark = if (dark) Color(0xFFFF8A8A) else Color(0xFFE94634),
+    // 背景三段：Monet 的面色系 —— 浅色白→微染沉；深色反过来（旧玻璃时代的
+    // 光晕 / 噪点 / 网格字段保留但 alpha 全 0，绘制已随重做删除）
+    bgTop = if (dark) mc.surfaceContainerHighest else mc.surfaceVariant,
+    bgMid = mc.background,
+    bgBottom = if (dark) mc.surfaceVariant else mc.secondaryContainerVariant,
+    bgGlow = mc.tertiaryContainer,
+    bgGlowAlpha = if (dark) 0.10f else 0.16f,
+    bgVignette = Color.Black,
+    bgVignetteAlpha = 0f,
+    bgGrain = Color.White,
+    bgGrainAlpha = 0f,
+    bgLine = Color.White,
+    bgLineAlpha = 0f,
+    glass = mc.surface,
+    cardBg = mc.surfaceContainer,
+    glassTint = Color.White,
+    glassBorder = if (dark) Color(0x33FFFFFF) else Color(0xB3FFFFFF),
+    // 旧 L1 玻璃字段：新设计里无人读，中性占位
+    glassFillTop = Color.White,
+    glassFillBottom = Color.White,
+    glassFillTopAlpha = 0f,
+    glassFillBottomAlpha = 0f,
+    glassEdgeHi = Color.White,
+    glassEdgeHiAlpha = 0f,
+    glassEdgeMidAlpha = 0f,
+    glassEdgeLow = mc.primary,
+    glassEdgeLowAlpha = 0f,
+    glassTopEdgeAlpha = 0.55f,
+    glassTopEdgeDp = 1.5f,
+    glassBottomEdge = Color.Black,
+    glassBottomEdgeAlpha = 0f,
+    glassSweepAlpha = 0f,
+    glassShadow = Color.Black,
+    glassShadowAlpha = 0f,
+    glassShadowDp = 12f,
+    fieldFill = if (dark) Color(0x26FFFFFF) else Color(0x0F000000),
+    fieldBorder = if (dark) Color(0x24FFFFFF) else Color(0x14000000),
+    dark = dark,
+)
+
+/**
+ * Robolectric 的 SkSL 实现不支持 miuix squircle 着色器里的 layout(color) 限定符。
+ * 纯 JVM 测试（无 Robolectric）里 [Build.FINGERPRINT] 是 null —— 不崩，按非 Robolectric 处理。
+ */
+private val IS_ROBOLECTRIC = Build.FINGERPRINT?.startsWith("robolectric") == true
+
 @Composable
 fun GoutouTheme(dark: Boolean? = null, content: @Composable () -> Unit) {
     val isDark = dark ?: isSystemInDarkTheme()
-    val palette = if (isDark) DarkPalette else LightPalette
-    CompositionLocalProvider(LocalPalette provides palette) {
-        MaterialTheme(
-            colorScheme = if (isDark) {
-                darkColorScheme(primary = palette.primary, background = palette.bgTop, surface = palette.glass)
-            } else {
-                lightColorScheme(primary = palette.primary, background = palette.bgTop, surface = palette.glass)
+    // 莫奈取色（2026-10）：整套主题从壁纸动态取色 —— Miuix 的 Monet 模式，
+    // keyColor 留空 = 取系统壁纸。[dark] 参数（测试 / 预览钉深浅）映射到 MonetLight / MonetDark。
+    val controller = remember(dark) {
+        ThemeController(
+            when (dark) {
+                null -> ColorSchemeMode.MonetSystem
+                false -> ColorSchemeMode.MonetLight
+                true -> ColorSchemeMode.MonetDark
             },
-            content = content,
         )
+    }
+    // squircle（HyperOS 超圆角）真机开；Robolectric 退普通圆角
+    //（它的 SkSL 不认 layout(color)，会直接抛 IllegalArgumentException）
+    CompositionLocalProvider(LocalSquircleEnabled provides !IS_ROBOLECTRIC) {
+        MiuixTheme(controller = controller) {
+            val palette = monetPalette(MiuixTheme.colorScheme, isDark)
+            CompositionLocalProvider(LocalPalette provides palette) {
+                MaterialTheme(
+                    colorScheme = if (isDark) {
+                        darkColorScheme(primary = palette.primary, background = palette.bgTop, surface = palette.glass)
+                    } else {
+                        lightColorScheme(primary = palette.primary, background = palette.bgTop, surface = palette.glass)
+                    },
+                    content = content,
+                )
+            }
+        }
     }
 }
 
@@ -566,20 +674,19 @@ fun GoutouTheme(dark: Boolean? = null, content: @Composable () -> Unit) {
  * 用户在设置里选了自己的图就以他的图为准，装饰层会被盖住，索性不画。
  */
 // internal 而不是 private：截图回归要**直接**调它。
-// 走 BackgroundLayer 不行 —— 那里面有一圈 withFrameNanos 的扫光，Compose 测试会永远等不到 idle。
+// 走 BackgroundLayer 不行 —— Compose 测试会等不到 idle。
 internal fun DrawScope.drawBackdropArt(
     b: Backdrop,
     w: Float,
     h: Float,
     quality: GlassQuality = GlassQuality.HIGH,
     /**
-     * 0..1 的动画相位：只用来让左上角那团光晕**缓慢漂移**（设计师 P2：动效按档启用）。
-     * 默认 0 = 完全静止 —— 中/低档位、截图回归（`ScreenRenderTest`）以及面板里那份背景副本
-     * 都走这个默认值，所以测试与低配机不会因为动画而抖动。
+     * 0..1 的动画相位 —— 设计重做后背景不再有动效，参数保留只为兼容旧签名。
      */
     drift: Float = 0f,
 ) {
-    // ① 底色渐变（斜向）：永远画。图还没解码完、或者用户选了张很亮的图时，兜住文字对比度。
+    // ① 底色渐变（斜向）：Miuix 式极淡冷灰渐变，永远画。图还没解码完、或者用户选了张
+    //    很亮的图时，兜住文字对比度。
     drawRect(
         brush = Brush.linearGradient(
             colors = listOf(b.bgTop, b.bgMid, b.bgBottom),
@@ -611,82 +718,27 @@ internal fun DrawScope.drawBackdropArt(
         return
     }
 
-    // ② 左上角光晕 —— 整块背景的光源。
-    //    动效按档启用（设计师 P2）：只有**最高档位**才让它漂移，幅度很小（±3% 宽 / ±2% 高）——
-    //    是「呼吸」，不是「晃」。中/低档与截图回归传 drift = 0，完全静止。
+    // ② 莫奈色斑（App **自绘**的背景内容，不是壁纸图片 —— 颜色取自壁纸的莫奈色板）：
+    //    两团大色块是液态玻璃底栏的「可折射内容」—— 色块边缘穿过玻璃时被弯折、色散
     if (b.bgGlowAlpha > 0f) {
-        val swing = if (quality == GlassQuality.HIGH) (drift * 2f - 1f) else 0f
         drawRect(
             brush = Brush.radialGradient(
                 colors = listOf(b.bgGlow.copy(alpha = b.bgGlowAlpha), Color.Transparent),
-                center = Offset(w * 0.72f + swing * w * 0.03f, h * 0.12f + swing * h * 0.02f),
-                // 半径 0.9W：光晕要「铺得开」才给玻璃一点可透的明暗起伏（原来 1.10W 太平）
-                radius = max(w * 0.90f, h * 0.45f),
+                center = Offset(w * 0.74f, h * 0.16f),
+                radius = max(w * 0.85f, h * 0.42f),
             ),
             topLeft = Offset.Zero,
             size = Size(w, h),
         )
-    }
-
-    // ③ 上下暗角
-    if (b.bgVignetteAlpha > 0f) {
-        val v = b.bgVignette.copy(alpha = b.bgVignetteAlpha)
         drawRect(
-            brush = Brush.verticalGradient(
-                0.00f to v,
-                0.26f to Color.Transparent,
-                0.74f to Color.Transparent,
-                1.00f to v,
+            brush = Brush.radialGradient(
+                colors = listOf(b.primary.copy(alpha = b.bgGlowAlpha * 0.7f), Color.Transparent),
+                center = Offset(w * 0.18f, h * 0.70f),
+                radius = max(w * 0.70f, h * 0.36f),
             ),
             topLeft = Offset.Zero,
             size = Size(w, h),
         )
-    }
-
-    // 低档位到此为止：噪点和网格都算「细节」，弱机上省掉
-    if (quality == GlassQuality.LOW) return
-
-    // ④ 星尘噪点。
-    //    位置用的是**由尺寸算出来的确定性伪随机**：同一块屏幕永远画同一批点，
-    //    切页 / 重绘时不会闪，也就不需要 remember 一份点表。
-    if (b.bgGrainAlpha > 0f && w > 0f && h > 0f) {
-        var seed = ((w.toInt() * 31) xor (h.toInt() * 17)) or 1
-        fun next(): Float {
-            seed = seed * 1103515245 + 12345
-            return ((seed ushr 9) and 0x7FFF) / 32767f
-        }
-        val count = (w * h / 26_000f).toInt().coerceIn(48, 220)
-        val baseR = 0.55.dp.toPx()
-        val spanR = 1.20.dp.toPx()
-        repeat(count) {
-            val x = next() * w
-            val y = next() * h
-            val t = next()
-            drawCircle(
-                color = b.bgGrain.copy(alpha = b.bgGrainAlpha * (0.35f + 0.65f * t)),
-                radius = baseR + t * spanR,
-                center = Offset(x, y),
-            )
-        }
-    }
-
-    // ⑤ 微网格：只有最高档位才画。一格 34dp、颜色极淡。
-    if (quality == GlassQuality.HIGH && b.bgLineAlpha > 0f) {
-        val step = 34.dp.toPx()
-        if (step > 0f) {
-            val color = b.bgLine.copy(alpha = b.bgLineAlpha)
-            val stroke = 1.dp.toPx().coerceAtLeast(1f)
-            var x = 0f
-            while (x <= w) {
-                drawLine(color, Offset(x, 0f), Offset(x, h), stroke)
-                x += step
-            }
-            var y = 0f
-            while (y <= h) {
-                drawLine(color, Offset(0f, y), Offset(w, y), stroke)
-                y += step
-            }
-        }
     }
 }
 
@@ -716,29 +768,15 @@ private const val GLASS_SWEEP_MIN_FRAME_MS = 32L
 @Composable
 fun BackgroundLayer(backdrop: Backdrop) {
     val root = LocalRootSize.current
-    val phase = LocalGlassPhase.current
-    val quality = LocalGlassQuality.current
-
-    // 低档位连相位都不推：省掉每帧的动画开销
-    if (GLASS_SWEEP_ENABLED && quality != GlassQuality.LOW) {
-        LaunchedEffect(Unit) {
-            var last = 0L
-            while (true) {
-                val now = withFrameNanos { it }
-                if (now - last < GLASS_SWEEP_MIN_FRAME_MS * 1_000_000L) continue
-                last = now
-                phase.phase = (now / 1_000_000L % GLASS_SWEEP_PERIOD_MS) / GLASS_SWEEP_PERIOD_MS.toFloat()
-            }
-        }
-    }
-
+    // 设计重做（2026-10）：镜面扫光的 withFrameNanos 循环删除 ——
+    // 新背景是静态的（渐变 / 图片），没有任何需要驱动的动效
     Spacer(
         Modifier
             .fillMaxSize()
             .drawBehind {
                 val w = if (root.width > 0) root.width.toFloat() else size.width
                 val h = if (root.height > 0) root.height.toFloat() else size.height
-                drawBackdropArt(backdrop, w, h, quality, drift = phase.phase)
+                drawBackdropArt(backdrop, w, h)
             },
     )
 }
@@ -790,13 +828,18 @@ private fun decodeBackdrop(uriStr: String): ImageBitmap? {
  * 关键点：模糊层的尺寸只有**面板那么大**（不是整屏），所以代价和面板面积成正比。
  * 默认渐变背景没有细节可模糊，这时直接跳过 ①（省一次离屏渲染）。
  */
+/**
+ * 扁平 squircle 行卡（设计重做 2026-10）：HyperOS 式实底色超椭圆，可点。
+ * 旧签名（shape / glassAlpha / tint* / refract / big）保留只为兼容现有调用点 ——
+ * 玻璃染色 / 扫光 / 多层描边那套已随重做删除。
+ */
 @Composable
 fun GlassSurface(
     shape: Shape,
     glassAlpha: Float,
     modifier: Modifier = Modifier,
     borderColor: Color? = null,
-    /** R4 大面板（底栏那种「一整块板」）：填充更实、只留一条顶边光、不要全圈描边。 */
+    /** 不再区分大面板：统一同一套卡片视觉。参数保留兼容。 */
     big: Boolean = false,
     tintTop: Float? = null,
     tintBottom: Float? = null,
@@ -805,161 +848,28 @@ fun GlassSurface(
     content: @Composable BoxScope.() -> Unit,
 ) {
     val palette = LocalPalette.current
-    val backdrop = LocalBackdrop.current
-    val root = LocalRootSize.current
-    val phase = LocalGlassPhase.current
-    val quality = LocalGlassQuality.current
-    var pos by remember { mutableStateOf(Offset.Zero) }
-    // 面板自身的像素尺寸：折射着色器要按它算 SDF 和折射位移。
-    // 用布局实测值而不是 graphicsLayer 作用域里的 size —— 后者的类型随版本变，
-    // 实测值既明确又一定是 px。
-    var panel by remember { mutableStateOf(IntSize.Zero) }
-    // L2（卡内子块）自己传 tintTop/tintBottom，沿用白色染色（且调用方已经乘过 glassAlpha）；
-    // L1 主面板走新的紫灰填充，并按 fillAlpha 的公式随「玻璃强度」微调。
-    val l2 = tintTop != null || tintBottom != null
-    // 低配档补偿（设计师 P2）：低档不模糊、不折射、不扫光，只剩一层染色，卡片会读成「薄」。
-    // 补偿三件事 —— 填充 +0.04、描边固定 0.16、去掉投影（最后一件在 [GlassCard] 里）。
-    val lowComp = quality == GlassQuality.LOW
-    val boost = (if (big) 0.08f else 0f) + (if (lowComp && !l2) 0.04f else 0f)
-    val top = if (l2) (tintTop ?: palette.glassFillTopAlpha) else fillAlpha(palette.glassFillTopAlpha + boost, glassAlpha)
-    val bottom = if (l2) (tintBottom ?: palette.glassFillBottomAlpha) else fillAlpha(palette.glassFillBottomAlpha + boost, glassAlpha)
-    val fillTop = if (l2) palette.glassTint else palette.glassFillTop
-    val fillBottom = if (l2) palette.glassTint else palette.glassFillBottom
-    val sized = root.width > 0 && root.height > 0
-    // 低档位连模糊都不做，只留半透明染色（弱机上 RenderEffect 的离屏模糊很贵）
-    val hasImage = sized && backdrop.bitmap != null && backdrop.blur > 0.dp && quality != GlassQuality.LOW
-    val glass = remember { AgslGlass() }
-    // 折射只在「背景里有东西可折 + 设备撑得住」时才做
-    val wantsRefraction = refract && hasImage && quality == GlassQuality.HIGH
-
+    val radius = if (big) RadiusR4 else RadiusR2
     Box(
         modifier
-            .onGloballyPositioned {
-                pos = it.positionInRoot()
-                panel = it.size
-            }
-            .clip(shape)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
-    ) {
-        if (wantsRefraction && glass.available) {
-            // ①a 真折射：先把「这一格背后的背景」画进图层，再让 AGSL 按边缘斜面把它折一下
-            Spacer(
-                Modifier
-                    .matchParentSize()
-                    .graphicsLayer {
-                        renderEffect = glass.effect(panel.width, panel.height)?.asComposeRenderEffect()
-                    }
-                    .clipToBounds()
-                    .drawBehind {
-                        withTransform({ translate(-pos.x, -pos.y) }) {
-                            drawBackdropArt(backdrop, root.width.toFloat(), root.height.toFloat(), quality)
-                        }
-                    },
-            )
-        } else if (hasImage) {
-            // ①b 降级路径：API < 33 或着色器编译失败时，退回原来的模糊
-            Spacer(
-                Modifier
-                    .matchParentSize()
-                    .blur(backdrop.blur)
-                    .clipToBounds()
-                    .drawBehind {
-                        withTransform({ translate(-pos.x, -pos.y) }) {
-                            drawBackdropArt(backdrop, root.width.toFloat(), root.height.toFloat(), quality)
-                        }
-                    },
-            )
-        }
-        // ② 玻璃染色（L1 = 紫灰雾面 / L2 = 白）
-        Spacer(
-            Modifier.matchParentSize().background(
-                Brush.verticalGradient(listOf(fillTop.copy(alpha = top), fillBottom.copy(alpha = bottom))),
-            ),
-        )
-        // ③ 镜面扫光（liquidGL 的 specular）：一道很淡的斜光缓缓扫过。
-        //    相位由 BackgroundLayer 推，所以不需要额外动画驱动；只在 draw 阶段读，不触发重组。
-        if (GLASS_SWEEP_ENABLED && quality != GlassQuality.LOW) {
-            Spacer(
-                Modifier.matchParentSize().drawBehind {
-                    val p = (phase.phase * 2f) % 1f
-                    val band = size.width * 0.30f
-                    val cx = -band + (size.width + 2f * band) * p
-                    drawRect(
-                        brush = Brush.linearGradient(
-                            0f to Color.Transparent,
-                            0.5f to Color.White.copy(alpha = sweepAlpha(palette.glassSweepAlpha, glassAlpha)),
-                            1f to Color.Transparent,
-                            start = Offset(cx - band, -size.height * 0.35f),
-                            end = Offset(cx + band, size.height * 1.35f),
-                        ),
-                        size = size,
-                    )
+            .squircleBackground(palette.cardBg, radius, 1f)
+            .then(
+                if (borderColor != null) {
+                    Modifier.border(1.dp, borderColor, RoundedCornerShape(radius))
+                } else {
+                    Modifier
                 },
             )
-        }
-        // ④ 上光源：顶边一条高光 + 底边一条极淡的反光。
-        //    设计师原话「顶边白 0.20、底边白 0.04 —— 这一条最出质感」：有它才像一块悬着的玻璃，
-        //    而不是一块平板嵌在框里。降低染色 alpha 之后，这一条就是「这还是玻璃」的主要凭据。
-        Spacer(
-            Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .height(palette.glassTopEdgeDp.dp)
-                .background(
-                    Brush.horizontalGradient(
-                        listOf(
-                            Color.Transparent,
-                            Color.White.copy(alpha = palette.glassTopEdgeAlpha),
-                            Color.Transparent,
-                        ),
-                    ),
-                ),
-        )
-        Spacer(
-            Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(
-                    Brush.horizontalGradient(
-                        listOf(
-                            Color.Transparent,
-                            palette.glassBottomEdge.copy(alpha = palette.glassBottomEdgeAlpha),
-                            Color.Transparent,
-                        ),
-                    ),
-                ),
-        )
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+    ) {
         content()
-        // ⑤ 边缘：报错卡片之类沿用纯色描边；其余用「左上亮、右下暗」的斜面渐变当 bevel
-        // 大面板（底栏）刻意不画全圈：圈出来反而显小气，只留上面那条顶边光
-        if (!big) {
-            Spacer(
-                Modifier.matchParentSize().border(
-                    width = 1.dp,
-                    brush = if (borderColor != null) {
-                        SolidColor(borderColor)
-                    } else if (lowComp) {
-                        // 低配档：没有模糊 / 折射衬托，「左上亮、右下暗」这套斜面 bevel 根本读不出来 ——
-                        // 换成一条**均匀**的 0.16 描边（设计师 P2 给的数值）。它是这一档唯一的「厚度」凭据。
-                        SolidColor(Color.White.copy(alpha = LOW_TIER_EDGE_ALPHA))
-                    } else {
-                        Brush.linearGradient(
-                            0f to palette.glassEdgeHi.copy(alpha = edgeAlpha(palette.glassEdgeHiAlpha, glassAlpha)),
-                            0.45f to Color.White.copy(alpha = edgeAlpha(palette.glassEdgeMidAlpha, glassAlpha)),
-                            1f to palette.glassEdgeLow.copy(alpha = edgeAlpha(palette.glassEdgeLowAlpha, glassAlpha)),
-                            start = Offset.Zero,
-                            end = Offset.Infinite,
-                        )
-                    },
-                    shape = shape,
-                ),
-            )
-        }
     }
 }
 
-/** 玻璃卡片：模糊背景 + 半透明底 + 顶部高光 + 亮边。 */
+/**
+ * 扁平 squircle 卡片（设计重做 2026-10）：HyperOS 式实底色超椭圆 + 极淡投影。
+ * 旧签名保留（[glassAlpha] 不再影响填充；[border] 变成 1dp 状态色描边），
+ * 全部页面无需改动即自动换新视觉。
+ */
 @Composable
 fun GlassCard(
     glassAlpha: Float,
@@ -969,34 +879,35 @@ fun GlassCard(
 ) {
     val palette = LocalPalette.current
     val quality = LocalGlassQuality.current
-    val cardShape = RoundedCornerShape(RadiusR3)
-    GlassSurface(
-        shape = cardShape,
-        glassAlpha = glassAlpha,
-        borderColor = border,
-        modifier = modifier
+    Column(
+        modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 8.dp)
-            // 外投影是「厚度」的一部分：**不乘 glassAlpha**（乘了滑到最低档就像贴在纸上），
-            // 颜色与强度按规范（浅色 y6/blur18 紫 / 深色 y8/blur24 近黑）。
-            // 低配档整层去掉（设计师 P2 的第三件补偿）：弱机上大面积 shadow 也要花钱，
-            // 而那一档本来就靠「填充 + 描边」立住了。
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .squircleBackground(palette.cardBg, RadiusR3, 1f)
+            // 极淡投影：HyperOS 卡的「浮起」感来自这里，低配档整层去掉（弱机 shadow 贵）
             .then(
                 if (quality == GlassQuality.LOW) {
                     Modifier
                 } else {
                     Modifier.shadow(
-                        elevation = palette.glassShadowDp.dp,
-                        shape = cardShape,
+                        elevation = 2.dp,
+                        shape = RoundedCornerShape(RadiusR3),
                         clip = false,
-                        ambientColor = palette.glassShadow.copy(alpha = palette.glassShadowAlpha),
-                        spotColor = palette.glassShadow.copy(alpha = palette.glassShadowAlpha),
+                        ambientColor = Color.Black.copy(alpha = 0.05f),
+                        spotColor = Color.Black.copy(alpha = 0.06f),
                     )
                 },
-            ),
-    ) {
-        Column(Modifier.padding(20.dp), content = content)
-    }
+            )
+            .then(
+                if (border != null) {
+                    Modifier.border(1.dp, border, RoundedCornerShape(RadiusR3))
+                } else {
+                    Modifier
+                },
+            )
+            .padding(18.dp),
+        content = content,
+    )
 }
 
 /**
@@ -1027,30 +938,22 @@ fun StatusChip(text: String, color: Color) {
     )
 }
 
-/** 玻璃胶囊（筛选、档位选择都用它）。它一般落在卡片里，所以只做染色、不再重复模糊。 */
+/** 胶囊按钮（筛选、档位选择）：选中 = 主色实底白字，未选中 = 中性灰底。 */
 @Composable
 fun GlassPill(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val palette = LocalPalette.current
-    val shape = RoundedCornerShape(RadiusR1)
+    val shape = RoundedCornerShape(50)
     Box(
         modifier
             .clip(shape)
             .background(
                 if (selected) {
-                    Brush.verticalGradient(
-                        listOf(palette.primary.copy(alpha = 0.92f), palette.primary.copy(alpha = 0.72f)),
-                    )
+                    palette.primary
                 } else {
-                    Brush.verticalGradient(
-                        // L2 常态块：白 0.18/0.10 —— L1 变暗后，低于 3% 的差就看不见了
-                        listOf(
-                            palette.glassTint.copy(alpha = 0.18f),
-                            palette.glassTint.copy(alpha = 0.10f),
-                        ),
-                    )
+                    // HyperOS 的未选块是中性灰（浅 #F0F0F0 / 深 #434343），不带任何描边
+                    if (palette.dark) Color(0xFF434343) else Color(0xFFF0F0F0)
                 },
             )
-            .border(1.dp, if (selected) palette.primary else palette.glassBorder.copy(alpha = 0.45f), shape)
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
@@ -1067,13 +970,14 @@ fun GlassPill(text: String, selected: Boolean, modifier: Modifier = Modifier, on
 @Composable
 fun ScreenHeader(title: String, sub: String, actions: @Composable RowScope.() -> Unit = {}) {
     val palette = LocalPalette.current
+    // Miuix 设置页式大标题（设计重做 2026-10）：大字标题 + 灰色副题（不再用主色当副题）
     Row(
-        Modifier.fillMaxWidth().padding(start = 20.dp, end = 16.dp, top = 16.dp, bottom = 6.dp),
+        Modifier.fillMaxWidth().padding(start = 18.dp, end = 16.dp, top = 18.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
-            Text(sub, fontSize = 13.sp, color = palette.primary)
+            Text(title, fontSize = 27.sp, fontWeight = FontWeight.SemiBold, color = palette.text)
+            Text(sub, fontSize = 13.sp, color = palette.sub)
         }
         actions()
     }
@@ -1189,11 +1093,17 @@ fun App(store: ConfigStore) {
         val backdrop = rememberBackdrop(ui.bgUri, ui.bgDim, ui.glassBlur)
 
         val phase = remember { GlassPhase() }
+        // 液态玻璃结构反转（2026-10 重写）：折射 RenderEffect 挂在**整个内容层**上，
+        // shader 只在底栏矩形内折射（content = 整页真实内容 —— 滚过底栏的文字被真实
+        // 弯折 / 色散），矩形外逐像素直通。底栏 UI 只上报矩形 + 弹簧手势。
+        val nav = remember { LiquidNavState() }
+        val refraction = remember { LiquidGlass() }
         CompositionLocalProvider(
             LocalBackdrop provides backdrop,
             LocalRootSize provides rootSize,
             LocalGlassPhase provides phase,
             LocalGlassQuality provides glassQuality,
+            LocalLiquidNav provides nav,
         ) {
             var contentAlpha by remember { mutableStateOf(0f) }
             LaunchedEffect(tab) {
@@ -1205,16 +1115,17 @@ fun App(store: ConfigStore) {
                     .fillMaxSize()
                     .onGloballyPositioned { rootSize = it.size },
             ) {
-                BackgroundLayer(backdrop)
-                Column(
-                    Modifier
-                        .fillMaxSize()
-                        .statusBarsPadding()
-                        .graphicsLayer {
-                            alpha = contentAlpha
-                            translationY = (1f - contentAlpha) * 36f
-                        },
-                ) {
+                Box(Modifier.fillMaxSize().liquidGlassRefraction(nav, glassQuality, refraction)) {
+                    BackgroundLayer(backdrop)
+                    Column(
+                        Modifier
+                            .fillMaxSize()
+                            .statusBarsPadding()
+                            .graphicsLayer {
+                                alpha = contentAlpha
+                                translationY = (1f - contentAlpha) * 36f
+                            },
+                    ) {
                     when (tab) {
                         TAB_STATUS -> StatusScreen(store) { tab = TAB_TRIAL }
                         TAB_MENTOR -> MentorScreen(store, ui.glassAlpha) { ui = store.load() }
@@ -1241,16 +1152,15 @@ fun App(store: ConfigStore) {
                             else -> SettingsScreen(
                                 store = store,
                                 ui = ui,
-                                onUi = { ui = it },
                                 onOpenAdvanced = { settingsPage = 1 },
                             )
                         }
                     }
                 }
-                NavBar(
+                }   // 折射内容层（liquidGlassRefraction 那个 Box）
+                LiquidNavBar(
                     tab = tab,
                     health = health,
-                    glassAlpha = ui.glassAlpha,
                     modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(14.dp),
                 ) { next ->
                     // 离开这一栏就把二级页收掉：切走再回来应该回到列表，而不是停在上次那个二级页；
@@ -1261,182 +1171,5 @@ fun App(store: ConfigStore) {
                 }
             }
         }
-    }
-}
-
-private val NavShape = RoundedCornerShape(RadiusR4)
-private val NavIndicatorShape = RoundedCornerShape(RadiusR3)
-private val NavBarHeight = 62.dp
-
-/**
- * 底部导航。
- *
- * 和上一版的区别：
- * - 选中态从「每一格各自变色」改成**一整块会滑动的指示块**（弹簧跟随），切页时是连续的位移，
- *   而不是两块背景直接交换；
- * - 指示块用 `offset { }` 的 lambda 重载 → 只走布局阶段、不触发重组，滑动是满帧的；
- * - 图标随选中进度缩放 + 变色，文字跟着变重；
- * - 切页给一次轻触觉反馈，点起来「有实体感」；
- * - 徽标外加了一圈底色，从玻璃上浮出来，不再糊在背景里。
- */
-@Composable
-private fun NavBar(
-    tab: Int,
-    health: Health,
-    glassAlpha: Float,
-    modifier: Modifier = Modifier,
-    onTab: (Int) -> Unit,
-) {
-    val palette = LocalPalette.current
-    val haptics = LocalHapticFeedback.current
-    val items = listOf(
-        "运行状态" to Icons.Filled.Pets,
-        "军师" to Icons.Filled.Edit,
-        "角色" to Icons.Filled.Person,
-        "试一试" to Icons.Filled.PlayArrow,
-        "设置" to Icons.Filled.Settings,
-    )
-
-    var rowWidth by remember { mutableIntStateOf(0) }
-    val cellPx = if (rowWidth > 0) rowWidth.toFloat() / items.size else 0f
-    val slide = remember { Animatable(0f) }
-    LaunchedEffect(tab, cellPx) {
-        if (cellPx <= 0f) return@LaunchedEffect
-        slide.animateTo(tab.toFloat(), spring(dampingRatio = 0.76f, stiffness = Spring.StiffnessMediumLow))
-    }
-
-    GlassSurface(
-        shape = NavShape,
-        glassAlpha = glassAlpha,
-        // R4 是一整块板：填充更实、只留一条顶边光（见 GlassSurface 的 big）
-        big = true,
-        modifier = modifier.shadow(
-            elevation = (palette.glassShadowDp + 10f).dp,
-            shape = NavShape,
-            clip = false,
-            ambientColor = palette.glassShadow.copy(alpha = palette.glassShadowAlpha),
-            spotColor = palette.glassShadow.copy(alpha = palette.glassShadowAlpha),
-        ),
-    ) {
-        Box(Modifier.fillMaxWidth().height(NavBarHeight)) {
-            if (cellPx > 0f) {
-                Box(
-                    Modifier
-                        .align(Alignment.CenterStart)
-                        .offset { IntOffset((slide.value * cellPx).roundToInt(), 0) }
-                        .width(with(LocalDensity.current) { cellPx.toDp() })
-                        .fillMaxHeight()
-                        .padding(horizontal = 3.dp, vertical = 5.dp)
-                        .clip(NavIndicatorShape)
-                        .background(
-                            Brush.verticalGradient(
-                                listOf(
-                                    palette.primary.copy(alpha = 0.30f),
-                                    palette.primary.copy(alpha = 0.12f),
-                                ),
-                            ),
-                        )
-                        .border(1.dp, palette.primary.copy(alpha = 0.34f), NavIndicatorShape),
-                )
-            }
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .height(NavBarHeight)
-                    .onGloballyPositioned { rowWidth = it.size.width },
-            ) {
-                items.forEachIndexed { index, (label, icon) ->
-                    NavItem(
-                        label = label,
-                        icon = icon,
-                        selected = index == tab,
-                        palette = palette,
-                        badge = if (index == 0) health else null,
-                        modifier = Modifier.weight(1f),
-                        onClick = {
-                            if (index != tab) {
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                            }
-                            onTab(index)
-                        },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun NavItem(
-    label: String,
-    icon: ImageVector,
-    selected: Boolean,
-    palette: Palette,
-    badge: Health?,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    // 0 → 1 的「选中进度」，图标缩放/变色/字重都跟着它走，切换才有连续感
-    val p by animateFloatAsState(if (selected) 1f else 0f, tween(260))
-    val interaction = remember { MutableInteractionSource() }
-    val tint = lerp(palette.sub, palette.primary, p)
-
-    Column(
-        modifier
-            .fillMaxHeight()
-            .clip(RoundedCornerShape(RadiusR3))
-            // 自带指示块了，所以不要涟漪 —— 否则会闪出一个和指示块不重合的方块
-            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .graphicsLayer {
-                val scale = 0.94f + 0.06f * p
-                scaleX = scale
-                scaleY = scale
-                translationY = -1.5f * p
-            },
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Box {
-            Icon(
-                icon,
-                contentDescription = label,
-                tint = tint,
-                modifier = Modifier.size(21.dp + 2.dp * p),
-            )
-            if (badge != null) {
-                val badgeColor = when (badge) {
-                    Health.OK -> palette.ok
-                    Health.WARN -> palette.warn
-                    Health.BAD -> palette.bad
-                }
-                Box(
-                    Modifier
-                        .align(Alignment.TopEnd)
-                        .offset(x = 6.dp, y = (-5).dp)
-                        .size(14.dp)
-                        .clip(CircleShape)
-                        .background(palette.bgTop.copy(alpha = 0.90f))
-                        .padding(1.5.dp)
-                        .clip(CircleShape)
-                        .background(badgeColor),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        if (badge == Health.BAD) Icons.Filled.Close else Icons.Filled.Check,
-                        contentDescription = badge.label,
-                        tint = Color.White,
-                        modifier = Modifier.size(8.dp),
-                    )
-                }
-            }
-        }
-        Spacer(Modifier.height(3.dp))
-        Text(
-            label,
-            fontSize = 10.sp,
-            letterSpacing = 0.2.sp,
-            fontWeight = if (p > 0.5f) FontWeight.SemiBold else FontWeight.Normal,
-            color = tint,
-        )
     }
 }

@@ -8,9 +8,13 @@ import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -28,6 +32,8 @@ import dev.goutou.wingman.ui.ChatCandidatesScreen
 import dev.goutou.wingman.ui.GlassCard
 import dev.goutou.wingman.ui.GlassQuality
 import dev.goutou.wingman.ui.GoutouTheme
+import dev.goutou.wingman.ui.LiquidNavBar
+import dev.goutou.wingman.ui.RadiusR4
 import dev.goutou.wingman.ui.SettingsScreen
 import dev.goutou.wingman.ui.TrialScreen
 import dev.goutou.wingman.ui.drawBackdropArt
@@ -164,11 +170,14 @@ class ScreenRenderTest {
     }
 
     @Test
-    fun `设置页能渲染 且含玻璃效果三档`() {
-        page { SettingsScreen(store, store.load(), {}, {}) }
-        rule.onNodeWithText("外观").assertExists()
-        rule.onNodeWithText("玻璃效果", substring = true).assertExists()
-        rule.onNodeWithText("自动").assertExists()
+    fun `设置页能渲染 外观卡已随设计重做删除`() {
+        page { SettingsScreen(store, store.load(), {}) }
+        // 「接入：」只出现在高级设置入口卡的摘要行（副标题里没有，不会撞车）
+        rule.onNodeWithText("接入：", substring = true).assertExists()
+        rule.onNodeWithText("版本：", substring = true).assertExists()
+        // 外观卡（玻璃强度 / 档位 / 背景图）已删除 —— 出现了就是回退了
+        rule.onNodeWithText("外观").assertDoesNotExist()
+        rule.onNodeWithText("玻璃效果", substring = true).assertDoesNotExist()
         capture("settings")
     }
 
@@ -206,6 +215,17 @@ class ScreenRenderTest {
         rule.onNodeWithText("已经在白名单里的（1）").assertExists()
         capture("chat-candidates")
     }
+    @Test
+    fun `液态玻璃底栏能渲染 降级路径不崩`() {
+        // Robolectric 上没有 RuntimeShader（LiquidGlass.available=false），
+        // 这个用例走的是 LiquidNavBar 的降级分支（莫奈扁卡底）——
+        // 真·AGSL 折射（挂在整个内容层上）要靠真机验证，这里保证「底栏还在、页签还在」
+        page { LiquidNavBar(tab = 0, health = null) { } }
+        rule.onNodeWithText("状态").assertExists()
+        rule.onNodeWithText("试一试").assertExists()
+        capture("liquid-glass-bar")
+    }
+
     @Test
     fun `高级设置 深色能渲染`() {
         page(dark = true) { AdvancedScreen(store, store.load(), {}, {}, {}, {}) }
