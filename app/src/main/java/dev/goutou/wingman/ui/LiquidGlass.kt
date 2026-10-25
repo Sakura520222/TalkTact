@@ -24,14 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Pets
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -767,7 +760,6 @@ private val LiquidNavHeight = 66.dp
 @Composable
 fun LiquidNavBar(
     tab: Int,
-    health: Health?,
     modifier: Modifier = Modifier,
     onTab: (Int) -> Unit,
 ) {
@@ -776,11 +768,11 @@ fun LiquidNavBar(
     val nav = LocalLiquidNav.current
     val tabs = remember {
         listOf(
-            NavTab("状态", Icons.Filled.Pets),
-            NavTab("军师", Icons.Filled.Edit),
-            NavTab("角色", Icons.Filled.Person),
-            NavTab("试一试", Icons.Filled.PlayArrow),
-            NavTab("设置", Icons.Filled.Settings),
+            NavTab("状态", NavIconStatus),
+            NavTab("军师", NavIconMentor),
+            NavTab("角色", NavIconRoles),
+            NavTab("试一试", NavIconTrial),
+            NavTab("设置", NavIconSettings),
         )
     }
 
@@ -900,7 +892,6 @@ fun LiquidNavBar(
                 NavTabItem(
                     tab = t,
                     selected = index == tab,
-                    badge = if (index == 0) health else null,
                     modifier = Modifier.weight(1f),
                     onClick = { onTab(index) },
                 )
@@ -909,12 +900,12 @@ fun LiquidNavBar(
     }
 }
 
-/** 单个页签：Miuix 风格（图标 + 小字、选中变主色），带轻微缩放过渡；模块健康徽标 8dp 圆点。 */
+/** 单个页签：Miuix 风格（线性图标 + 小字、选中变主色），带轻微缩放过渡。
+ *  模块健康徽标（绿点）已按需求移除 —— 状态详情在「状态」页里看。 */
 @Composable
 private fun NavTabItem(
     tab: NavTab,
     selected: Boolean,
-    badge: Health?,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
@@ -943,29 +934,12 @@ private fun NavTabItem(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Box {
-            Icon(
-                tab.icon,
-                contentDescription = tab.label,
-                tint = tint,
-                modifier = Modifier.size(22.dp + 2.dp * p),
-            )
-            if (badge != null) {
-                val color = when (badge) {
-                    Health.OK -> palette.ok
-                    Health.WARN -> palette.warn
-                    Health.BAD -> palette.bad
-                }
-                Box(
-                    Modifier
-                        .align(Alignment.TopEnd)
-                        .offset(4.dp, (-3).dp)
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(color),
-                )
-            }
-        }
+        Icon(
+            tab.icon,
+            contentDescription = tab.label,
+            tint = tint,
+            modifier = Modifier.size(22.dp + 2.dp * p),
+        )
         Spacer(Modifier.height(3.dp))
         Text(
             tab.label,

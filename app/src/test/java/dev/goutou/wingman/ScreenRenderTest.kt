@@ -220,7 +220,7 @@ class ScreenRenderTest {
         // Robolectric 上没有 RuntimeShader（LiquidGlass.available=false），
         // 这个用例走的是 LiquidNavBar 的降级分支（莫奈扁卡底）——
         // 真·AGSL 折射（挂在整个内容层上）要靠真机验证，这里保证「底栏还在、页签还在」
-        page { LiquidNavBar(tab = 0, health = null) { } }
+        page { LiquidNavBar(tab = 0) { } }
         rule.onNodeWithText("状态").assertExists()
         rule.onNodeWithText("试一试").assertExists()
         capture("liquid-glass-bar")

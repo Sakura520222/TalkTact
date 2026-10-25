@@ -1080,7 +1080,7 @@ fun App(store: ConfigStore) {
     var settingsPage by remember { mutableIntStateOf(0) }
     // 只关心「影响外观」的那几个字段：玻璃透明度/模糊、背景
     var ui by remember { mutableStateOf(store.load()) }
-    val health = healthOf(store)
+    // 模块健康状态：底栏徽标已移除，详情在「状态」页里看；healthOf 留作页面内部用
     // 设备能力只问一次：isLowRamDevice 有成本，运行中也不会变
     val context = LocalContext.current
     val lowRam = remember { isLowRamDevice(context) }
@@ -1160,7 +1160,6 @@ fun App(store: ConfigStore) {
                 }   // 折射内容层（liquidGlassRefraction 那个 Box）
                 LiquidNavBar(
                     tab = tab,
-                    health = health,
                     modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(14.dp),
                 ) { next ->
                     // 离开这一栏就把二级页收掉：切走再回来应该回到列表，而不是停在上次那个二级页；
