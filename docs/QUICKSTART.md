@@ -6,7 +6,7 @@
 
 - [Releases](https://github.com/Sakura520222/TalkTact/releases) 提供已发布的版本，功能以该版本说明为准。
 - [Build 工作流](https://github.com/Sakura520222/TalkTact/actions/workflows/build.yml) 提供开发构建。在成功的运行中选择对应分支的 APK artifact；它是调试包，签名可能与发行包不同。
-- 当前 `feature/miuix-liquid-ui` 分支包含五页重写、液态玻璃底栏和微信 / QQ 新浮窗；这些改动尚未包含在 `0.8.12-fork.1` 测试版中。
+- [0.9.0 正式版](https://github.com/Sakura520222/TalkTact/releases/tag/v0.9.0) 包含五页重写、液态玻璃底栏和微信 / QQ 新浮窗；早期 `0.8.12-fork.1` 测试版不包含这些改动。
 
 Android 需为 **12 及以上、arm64**，模块框架需提供 **libxposed Modern API 102**。高品质折射需要 Android 13 及以上；低品质或能力不足时保留普通卡片。
 

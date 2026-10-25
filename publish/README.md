@@ -20,7 +20,7 @@
 
 [发行版本](https://github.com/Sakura520222/TalkTact/releases) · [开发构建](https://github.com/Sakura520222/TalkTact/actions/workflows/build.yml) · [开始使用](../docs/QUICKSTART.md)
 
-本页介绍开发分支；五页重写、QQ 接入和新玻璃浮窗尚未包含在现有的 `0.8.12-fork.1` 测试版中。Android 需为 12+、arm64，框架需提供 Modern API 102；高品质折射需要 Android 13+。
+[0.9.0 正式版](https://github.com/Sakura520222/TalkTact/releases/tag/v0.9.0) 已包含五页重写、QQ 接入和新玻璃浮窗，早期 `0.8.12-fork.1` 测试版不包含这些改动。Android 需为 12+、arm64，框架需提供 Modern API 102；高品质折射需要 Android 13+。
 
 与原版同包名、不同签名，不能并存；切换前先备份。模块不会自动发送消息，也不读取宿主数据库；分析使用你配置的模型接口。图片页识字与强制冷启动无响应仍在排查，当前进展见 [兼容说明](../README.md#兼容与进展)。
 

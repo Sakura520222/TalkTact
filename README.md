@@ -40,7 +40,7 @@ QQ 接入默认关闭，启用并获得框架作用域后使用**手动识别**�
 
 以下对照本 Fork 基于的 [上游 0.8.12](https://github.com/shibry88-netizen/TalkTact/tree/b4c83d7f0326d1a205f5997283d33b7fc654dab1)；原版已有的能力列在下一节。
 
-| 方面 | 原版 | 当前 Fork 分支 |
+| 方面 | 原版 | 本 Fork 0.9.0 |
 | --- | --- | --- |
 | App 界面 | 原有五页、功能卡片与折叠入口 | 五页重写，分类设置、角色搜索与直接可见的常用操作 |
 | 视觉 | 渐变背景与玻璃拟态卡片 | HyperIsland 风格页面、液态玻璃底栏与整卡聊天浮窗 |
@@ -62,7 +62,7 @@ QQ 接入默认关闭，启用并获得框架作用域后使用**手动识别**�
 
 [Releases](https://github.com/Sakura520222/TalkTact/releases) 提供已发布版本，[Build 工作流](https://github.com/Sakura520222/TalkTact/actions/workflows/build.yml) 提供开发构建。
 
-**本页介绍 `feature/miuix-liquid-ui` 开发分支。** 五页重写、QQ 接入和新玻璃浮窗尚未包含在现有的 `0.8.12-fork.1` 测试版中，下载时请核对对应版本说明。
+**[0.9.0 · 首个正式版](https://github.com/Sakura520222/TalkTact/releases/tag/v0.9.0)** 包含五页重写、QQ 接入和新玻璃浮窗。早期 `0.8.12-fork.1` 测试版不包含这些改动，下载时请核对对应版本说明。
 
 本 Fork 与原版同包名、不同签名，不能并存。从原版切换前，先导出备份，再卸载安装并导入。具体步骤见 [开始使用](docs/QUICKSTART.md)。
 

@@ -40,7 +40,7 @@ QQ integration is off by default. Enable it and grant framework scope to use **m
 
 The comparison uses [upstream 0.8.12](https://github.com/shibry88-netizen/TalkTact/tree/b4c83d7f0326d1a205f5997283d33b7fc654dab1), the base of this fork. Inherited features are listed separately below.
 
-| Area | Original | Current fork branch |
+| Area | Original | This fork, 0.9.0 |
 | --- | --- | --- |
 | App UI | Original five pages, feature cards and expandable sections | Redesigned pages, grouped settings, profile search and visible common actions |
 | Appearance | Gradient backgrounds and glass-style cards | HyperIsland-inspired pages, liquid-glass navigation and full-card chat backdrops |
@@ -62,7 +62,7 @@ Chat context is sent to the model endpoint you configure. Raw images are process
 
 [Releases](https://github.com/Sakura520222/TalkTact/releases) contains published versions. The [Build workflow](https://github.com/Sakura520222/TalkTact/actions/workflows/build.yml) provides development builds.
 
-**This page describes the `feature/miuix-liquid-ui` development branch.** The page redesign, QQ support and new glass panels are not included in the existing `0.8.12-fork.1` test release. Check the notes for the build you download.
+**[0.9.0, the first full release](https://github.com/Sakura520222/TalkTact/releases/tag/v0.9.0)** includes the page redesign, QQ support and new glass panels. These changes are absent from the earlier `0.8.12-fork.1` test release. Check the notes for the build you download.
 
 This fork keeps the original package name but uses a different signing key, so it cannot coexist with the original app. Export a backup before uninstalling the original, then install this fork and import it. See [getting started (Chinese)](docs/QUICKSTART.md).
 

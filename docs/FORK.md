@@ -4,10 +4,10 @@
 [shibry88-netizen/TalkTact](https://github.com/shibry88-netizen/TalkTact) 独立维护。
 保留原作者归属与 GPL-3.0；仅按需筛选上游有价值的提交，不自动同步或向上游提交 PR。
 
-首个独立二改测试版本为 **0.8.12-fork.1**（versionCode 40，基于上游 0.8.12），
-分发入口为 [本 fork 的预发布 Release](https://github.com/Sakura520222/TalkTact/releases/tag/v0.8.12-fork.1)。
-以上为已发布测试版的基线。当前开发分支的页面、QQ 接入与玻璃浮窗重写尚未包含在该发行包中。
-当前分支的实机进展与已知问题见 [README](../README.md#兼容与进展)，安装与迁移步骤见 [开始使用](QUICKSTART.md)。
+首个正式版本为 **0.9.0**（versionCode 41，基于上游 0.8.12），
+分发入口为 [本 fork Release](https://github.com/Sakura520222/TalkTact/releases/tag/v0.9.0)。
+早期 `0.8.12-fork.1` 测试版保留为历史发行物，不包含后续的页面、QQ 接入与玻璃浮窗重写。
+实机进展与已知问题见 [README](../README.md#兼容与进展)，安装与迁移步骤见 [开始使用](QUICKSTART.md)。
 
 ## 应用身份
 
