@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
+  <title id="title">TalkTact</title>
+  <desc id="description">紫色渐变底上的白色对话气泡、文字线条与金色星光。</desc>
+  <!-- Documentation vector based on the original TalkTact app icon in
+       art/talktact-icon-512.png. Original project: shibry88-netizen/TalkTact.
+       GPL-3.0. The Android launcher assets are unchanged. -->
+  <defs>
+    <linearGradient id="purple" x1="42" y1="20" x2="430" y2="480" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7365e8"/>
+      <stop offset=".52" stop-color="#7629dc"/>
+      <stop offset="1" stop-color="#7b35ef"/>
+    </linearGradient>
+    <radialGradient id="light" cx="142" cy="125" r="330" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9a8bef" stop-opacity=".48"/>
+      <stop offset="1" stop-color="#9a8bef" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="warmth" cx="412" cy="102" r="102" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ef998d" stop-opacity=".36"/>
+      <stop offset="1" stop-color="#ef998d" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bubble" x1="132" y1="144" x2="350" y2="388" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffefe"/>
+      <stop offset="1" stop-color="#e9eaff"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="158" y1="165" x2="202" y2="219" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffda69"/>
+      <stop offset="1" stop-color="#ffb52d"/>
+    </linearGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="175%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" rx="120" fill="url(#purple)"/>
+  <rect width="512" height="512" rx="120" fill="url(#light)"/>
+  <rect width="512" height="512" rx="120" fill="url(#warmth)"/>
+  <rect x="14" y="14" width="484" height="484" rx="106" fill="none" stroke="#c6bdff" stroke-opacity=".34" stroke-width="4"/>
+  <ellipse cx="260" cy="365" rx="105" ry="25" fill="#342076" opacity=".5" filter="url(#shadow)"/>
+  <path d="M168 132H344C375 132 400 157 400 188V292C400 323 375 348 344 348H238L133 420C125 426 114 419 119 409L147 345C126 337 112 317 112 294V188C112 157 137 132 168 132Z" fill="url(#bubble)"/>
+  <path d="M176.4 168.2Q180 160 183.6 168.2L189.1 182.3H203.7Q211.8 182.3 205.6 188.9L194.1 199.6L198.8 213.2Q201.5 222 194 217.1L180 208.7L166 217.1Q158.5 222 161.2 213.2L165.9 199.6L154.4 188.9Q148.2 182.3 156.3 182.3H170.9Z" fill="url(#gold)"/>
+  <rect x="222" y="185" width="134" height="22" rx="11" fill="#5145d6"/>
+  <rect x="152" y="229" width="204" height="22" rx="11" fill="#968de4"/>
+  <rect x="152" y="273" width="148" height="22" rx="11" fill="#b9b2ef"/>
+  <path d="M414 64C417 86 428 97 450 100C428 103 417 114 414 136C411 114 400 103 378 100C400 97 411 86 414 64Z" fill="#ffca51"/>
+  <path d="M352 64C353 71 356 74 363 75C356 76 353 79 352 86C351 79 348 76 341 75C348 74 351 71 352 64Z" fill="#fff08b"/>
+</svg>

@@ -13,6 +13,7 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.Info
@@ -33,6 +34,7 @@ import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.goutou.wingman.config.ConfigData
@@ -146,12 +148,15 @@ fun AppearanceScreen(store: ConfigStore, onSaved: () -> Unit, onBack: () -> Unit
 @Composable
 fun AboutScreen(onBack: () -> Unit) {
     val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
     HyperPage("关于 TalkTact", onBack = onBack) {
         HyperGroup {
             HyperRow("TalkTact", "微信聊天助手", Icons.Outlined.ChatBubbleOutline)
             HyperRow("版本", value = appVersion(context))
             HyperRow("许可证", value = "GPL-3.0")
             HyperRow("独立二改", "Sakura520222 · 原作者 shibry88-netizen")
+            HyperRow("GitHub 仓库", "github.com/Sakura520222/TalkTact", Icons.Outlined.Code,
+                onClick = { uriHandler.openUri("https://github.com/Sakura520222/TalkTact") })
         }
         HyperGroup("隐私与使用") {
             HyperRow("发送由你决定", "候选仅在点击后填入输入框，不会自动发送。")

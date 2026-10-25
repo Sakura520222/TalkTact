@@ -6,7 +6,8 @@
 
 首个独立二改测试版本为 **0.8.12-fork.1**（versionCode 40，基于上游 0.8.12），
 分发入口为 [本 fork 的预发布 Release](https://github.com/Sakura520222/TalkTact/releases/tag/v0.8.12-fork.1)。
-微信 hook、实际玻璃效果和 OCR 尚未真机复验，不能用 JVM 截图或上游历史验证代替。
+以上为已发布测试版的基线。当前开发分支的页面、QQ 接入与玻璃浮窗重写尚未包含在该发行包中。
+当前分支的实机进展与已知问题见 [README](../README.md#兼容与进展)，安装与迁移步骤见 [开始使用](QUICKSTART.md)。
 
 ## 应用身份
 
